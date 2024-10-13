@@ -1,27 +1,29 @@
 from pathlib import Path
 from libgit import Repository
-from log import create_logger
+from log import create_logger, reset_log_file
 from conf_globals import G_LOG_LEVEL, G_THREAD_NUM_WORKERS
 from concurrent.futures import ThreadPoolExecutor
 
 logger = create_logger("src.main", G_LOG_LEVEL)
 
-repos = [
-    Repository("https://github.com/r0fld4nc3/Stellaris-Exe-Checksum-Patcher"),
-    Repository("https://github.com/Chillsmeit/qBittorrent-ProtonVPN-Guide"),
-    Repository("https://github.com/Chillsmeit/PiHole-RPi5-Guide"),
-    Repository("https://github.com/Chillsmeit/AutomateGithubSSHkey")
-    ]
+repos = []
 to = Path(__name__).parent.parent / "tests/gitclone/repos"
 
 def clone_all_task(repo: Repository, to: Path):
-    repo.clone_to(to)
+    repo.clone_from(to)
 
-    # Do the branches
-    repo._collect_branch_names()
-    for branch in repo.repo_branches:
-        logger.info(f"Cloning branch '{branch}' into {to}...")
-        repo.clone_to(to, branch=branch)
+    with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
+        logger.info(f"Submitting clone_from for branches {', '.join(branch for branch in repo.repo_branches)} with {G_THREAD_NUM_WORKERS=}")
+        futures = [executor.submit(repo.clone_from, to, branch=branch) for branch in repo.repo_branches]
+        
+        for future in futures:
+            try:
+                future.result()
+                logger.info(f"Result awaited successful")
+            except Exception as e:
+                logger.error(f"Error cloning repository {e}")
+
+        logger.info(f"Done awaiting all ({len(futures)}) futures")
 
 
 def main() -> bool:
@@ -29,7 +31,7 @@ def main() -> bool:
     global to
 
     with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
-        logger.info(f"Submitting clone_all_task for repository with {G_THREAD_NUM_WORKERS=}")
+        logger.info(f"Submitting clone_all_task for repositories {', '.join(repo.name for repo in repos)} with {G_THREAD_NUM_WORKERS=}")
         futures = [executor.submit(clone_all_task, repo, to) for repo in repos]
         
         for future in futures:
@@ -44,4 +46,5 @@ def main() -> bool:
     return True
 
 if __name__ == "__main__":
+    reset_log_file()
     main()
