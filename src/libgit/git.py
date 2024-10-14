@@ -1,12 +1,14 @@
 import os
 import git
+import stat
 import shutil
 from pathlib import Path
 from typing import Tuple, Union
 from urllib.parse import urlparse
+from datetime import datetime, timedelta
 
 from log import create_logger
-from conf_globals import G_LOG_LEVEL
+from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
@@ -33,12 +35,13 @@ class Repository(git.Repo):
         self.name: str  = ""
         self.owner: str = ""
         self.cloned_to: Path = ""
-        self.repo_branches: list[str] = list()
+        self.repo: git.Repo = None
+        self.repo_branches: list[git.RemoteReference] = list()
         
         self.owner, self.name = _parse_repo_url(url)
 
     # TODO: Filter branches by commit date so we can gatekeep some branches from being cloned, referring to them as "active branches"
-    def clone_from(self, dest: Union[Path, str], branch: str = None, *args, **kwargs):
+    def clone_from(self, dest: Union[Path, str], branch: git.RemoteReference = None, *args, **kwargs):
         """`@Override`
         
         Override method to use to clone the designated GitHub URL to disk.
@@ -47,15 +50,15 @@ class Repository(git.Repo):
         `git.clone_from()` for the ``git`` library. It does not replace `git.clone_from()`,
         instead builds to it.
 
-        * When no :attr:`branch` is specified, the destination folder will be called `main`
+        * When no :param:`branch` is specified, the destination folder will be called `main`
         to indicate that it is the main branch that is being cloned.
 
-        * If :attr:`branch` is specified, it will attempt to clone a branch from the repository
+        * If :param:`branch` is specified, it will attempt to clone a branch from the repository
         and name the corresponding destination folder accordingly.
 
         Attributes it uses/modifies:
 
-        * :attr:`cloned_to`
+        * :param:`cloned_to`
         """
 
         # =================================
@@ -67,7 +70,7 @@ class Repository(git.Repo):
         else:
             dest = dest.resolve()
 
-        logger.debug(f"[{self.name}] Resolved destination: {dest}")
+        logger.debug(f"[{self.name}] [{branch}] Resolved destination: {dest}")
         
         if not dest.exists():
             logger.debug(f"[{self.name}] os.makedirs({dest}, exist_ok=True)")
@@ -77,12 +80,12 @@ class Repository(git.Repo):
             logger.debug(f"[{self.name}] {self.name.lower()} not in {dest}, therefore append {self.name} to {dest}")
             dest = dest / self.name
 
-        if not branch and "branch" not in kwargs:
-            logger.debug(f"[{self.name}] No branch set, {branch=}; {kwargs=}")
+        if not branch:
+            logger.debug(f"[{self.name}] No branch set, {branch=}")
             dest_end = "main"
         else:
-            logger.debug(f"[{self.name}] Branch set, {branch=}; {kwargs=}")
-            dest_end = branch
+            logger.debug(f"[{self.name}] Branch set, {branch=}")
+            dest_end = branch.name.split('/', 1)[-1]
 
         # The final destination for the specific branch inside the main dest folder
         branch_dest = dest / dest_end
@@ -90,15 +93,15 @@ class Repository(git.Repo):
         # =================================
         #             CLONING
         # =================================
-
-        if kwargs.get("branch") or branch:
-            if kwargs.get("branch"):
-                b = kwargs.get("branch")
+            
+        # Filter active commits
+        if branch:
+            active = self._filter_active(branch)
+            if not active:
+                logger.info(f"[{self.name}] Not cloning branch {branch.name} as it is considered inactive.")
+                return self
             else:
-                b = branch
-            logger.info(f"[{self.name}] Cloning branch {b} of {self.url} into {branch_dest}")
-        else:
-            logger.info(f"[{self.name}] Cloning {self.url} into {branch_dest}")
+                logger.info(f"[{self.name}] Cloning branch {branch.name} as it is considered active.")
 
         # If directory exists and is a cloned repo already, rename existing to avoid conflict
         if branch_dest.exists():
@@ -106,6 +109,7 @@ class Repository(git.Repo):
             
             self.cloned_to = branch_dest
             backup_dir = self.set_backup_dir(branch_dest)
+            self.__remove_dir(branch_dest) # Remove target directory avoid fatal clone error
             
             # Clone the repo/branch
             successful_clone, _ = self.__clone_from_basecls(self.url, branch_dest, args, kwargs)
@@ -119,8 +123,8 @@ class Repository(git.Repo):
                 # Remove the possible lingering destination directory
                 if branch_dest.exists():
                     self.__remove_dir(branch_dest)
-
-                logger.info(f"[{self.name}] Moving {branch_dest} -> {backup_dir}")
+                
+                # Set backup dir back
                 backup_dir.rename(branch_dest)
         else:
             successful_clone, _ = self.__clone_from_basecls(self.url, branch_dest, args, kwargs)
@@ -128,11 +132,14 @@ class Repository(git.Repo):
             if successful_clone:
                 self.cloned_to = branch_dest
 
-        if not kwargs.get("branch") and not branch:
+        if not branch:
             # Don't collect branch names if we're cloning a specific branch already
             self.collect_branch_names()
 
-        logger.info(f"[{self.name}] Clone finished.")
+        if branch:
+            logger.info(f"[{self.name}] [{branch.name}] Clone finished.")
+        else:
+            logger.info(f"[{self.name}] Clone finished.")
 
         return self
 
@@ -148,73 +155,123 @@ class Repository(git.Repo):
 
         Attributes it uses/modifies:
 
-        * :attr:`repo_branches`
+        * :param:`repo_branches`
         """
         logger.info(f"[{self.name}] Collecting branch names for {self.name}")
 
         self.repo_branches.clear()
 
         if self.cloned_to and self.cloned_to.exists():
-            git_repo = git.Repo(self.cloned_to)
-            logger.info(f"[{self.name}] {git_repo=}")
+            logger.info(f"[{self.name}] {self.repo=}")
 
-            self.repo_branches = [head.name for head in git_repo.remote().refs]
-            logger.info(f"[{self.name}] Repo branches: {self.repo_branches}")
+            # self.repo_branches = [head.name.split('/', 1)[-1] for head in self.repo.remote().refs]
+            self.repo_branches = [head for head in self.repo.remote().refs]
+            logger.debug(f"[{self.name}] Repo branches ({len(self.repo_branches)}): {self.repo_branches}")
 
             # Remove origin/HEAD & main branch/master since we already have it
-            logger.info(f"[{self.name}] Deleting origin/HEAD from branch list")
-            _removes = ["origin/HEAD", "origin/main", "origin/master"]
-            for r in _removes:    
-                try:
-                    self.repo_branches.remove(r)
-                except ValueError:
-                    logger.info(f"{r} not in branches")
+            _removes = ["HEAD", "main", "master"]
+            for branch in self.repo_branches:
+                if branch.name.split('/', 1)[-1] in _removes:
+                    try:
+                        self.repo_branches.remove(branch)
+                    except ValueError:
+                        logger.info(f"{branch.name} not in branches")
             
-            for idx, value in enumerate(self.repo_branches):
-                # Fix origin/name so path is correct
-                fixed = value.replace("origin/", "")
-                self.repo_branches[idx] = fixed
-                logger.debug(f"[{self.name}] Fixed name {value} -> {fixed}")
-            
-            logger.info(f"[{self.name}] Branches for Repository {self.name}: {self.repo_branches}")
+            logger.info(f"[{self.name}] {len(self.repo_branches)} branches for Repository {self.name}: {self.repo_branches}")
         
         return self
+    
+    def _filter_active(self, branch_ref: git.RemoteReference, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> bool:
+        """
+        Check if a branch has been active (committed to) within the given number of days.
+
+        :param branch_name: The name of the branch to check.
+        :param active_cutoff_days: The number of days to consider a branch as active (default: 30).
+        :return: True if the branch has commits within the cutoff period, False otherwise.
+        """
+        
+        if active_cutoff_days <= 0:
+            logger.debug(f"{active_cutoff_days=}")
+            return True
+        
+        # Branch is None or empty
+        if not branch_ref:
+            return False
+        
+        branch = branch_ref.name
+        
+        self.repo.remote().fetch()
+        
+        try:
+            logger.debug(f"[{self.name}] {branch=}")
+            commit = branch_ref.commit
+            commit_date = datetime.fromtimestamp(commit.committed_date).date()
+            cutoff_date = (datetime.now() - timedelta(days=active_cutoff_days)).date()
+            
+            logger.info(f"[{self.name}] Commit date for branch {branch}: {commit_date}")
+            logger.debug(f"[{self.name}] Cutoff date for branch {branch}: {cutoff_date}")
+            
+            days_ago = (datetime.now().date() - commit_date).days
+            logger.info(f"[{self.name}] Last commit for branch {branch}: {days_ago} days ago")
+            
+            return commit_date >= cutoff_date
+        except Exception as e:
+            logger.error(f"[{self.name}] An error has occurred from params ({branch_ref=}, {active_cutoff_days=}): {e}")
+            return False
 
     def set_backup_dir(self, dir_path: Path) -> Path:
         backup_dir: Path = dir_path.parent / f"backup-{dir_path.name}"
 
         if backup_dir.exists():
-            shutil.rmtree(backup_dir)
             logger.info(f"[{self.name}] Deleting backup-dir: {backup_dir}")
+            self.__remove_dir(backup_dir)
 
-        dir_path.rename(backup_dir)
+        shutil.copytree(dir_path, backup_dir, dirs_exist_ok=True)
         
         return backup_dir
 
-    def __remove_dir(self, backup_dir: Path) -> bool:
+
+    def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
-        logger.debug(f"[{self.name}] shutil.rmtree({backup_dir})")
+        logger.debug(f"[{self.name}] shutil.rmtree({to_remove}, onerror={_rmtree_on_error})")
         try:
-            shutil.rmtree(backup_dir)
+            shutil.rmtree(to_remove, onerror=_rmtree_on_error)
         except Exception as e:
             logger.error(f"[{self.name}] {e}", exc_info=1)
             return False
 
         return True
 
-    def __clone_from_basecls(self, url, dest, branch="", *args, **kwargs) -> Tuple[bool, Path]:
+    def __clone_from_basecls(self, url, dest, *args, **kwargs) -> Tuple[bool, Path]:
         successful_clone = False
+        
+        logger.debug(f"[{self.name}] Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
+        
         try:
-            logger.debug(f"[{self.name}] Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
-            if kwargs.get("branch") or branch:
-                logger.debug(f"[{self.name}] branch is valid in kwargs.")
-                # Call the original method branch
-                git.Repo.clone_from(self.url, dest, branch=branch, *args, **kwargs)
-            else:
-                # Call the original method no branch
-                git.Repo.clone_from(self.url, dest, *args, **kwargs)
+            self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
             successful_clone = True
         except Exception as e:
             logger.error(f"[{self.name}] {e}", exc_info=1)
 
         return successful_clone, dest
+    
+def _rmtree_on_error(func, path, exc_info):
+    # https://stackoverflow.com/a/2656405
+    """
+        Error handler for ``shutil.rmtree``.
+
+        If the error is due to an access error (read only file)
+        it attempts to add write permission and then retries.
+
+        If the error is for another reason it re-raises the error.
+
+        Usage : ``shutil.rmtree(path, onerror=onerror)``
+        """
+    # Is the error an access error?
+    if not os.access(path, os.W_OK):
+        logger.info(f"Re-attempting delete path {path}")
+        os.chmod(path, stat.S_IWUSR)
+        func(path)
+    else:
+        logger.error(f"Raising undeletable error for path {path}")
+        raise

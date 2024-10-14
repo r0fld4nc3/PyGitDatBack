@@ -11,17 +11,22 @@ to = (Path(__name__).parent.parent / "tests/gitclone/repos").resolve()
 
 def clone_all_task(repo: Repository, to: Path):
     repo.clone_from(to)
-
+    
+    # for branch in repo.repo_branches:
+    #     repo.clone_from(to, branch=branch)
+        
+    # return
+    
     with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
-        logger.info(f"Submitting clone_from for branches {', '.join(branch for branch in repo.repo_branches)} with {G_THREAD_NUM_WORKERS=}")
+        logger.info(f"Submitting clone_from for branches {', '.join(branch.name for branch in repo.repo_branches)} with {G_THREAD_NUM_WORKERS=}")
         futures = [executor.submit(repo.clone_from, to, branch=branch) for branch in repo.repo_branches]
         
         for future in futures:
             try:
-                future.result()
-                logger.info(f"Result awaited successful")
+                f = future.result()
+                logger.info(f"{f.name} Result branch awaited successful")
             except Exception as e:
-                logger.error(f"Error cloning repository {e}")
+                logger.error(f"Error cloning repository branch {e}")
 
         logger.info(f"Done awaiting all ({len(futures)}) futures")
 
@@ -38,8 +43,8 @@ def main() -> bool:
         
         for future in futures:
             try:
-                future.result()
-                logger.info(f"Result awaited successful")
+                f = future.result()
+                logger.info(f"{f} Result awaited successful")
             except Exception as e:
                 logger.error(f"Error cloning repository {e}")
 
