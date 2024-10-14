@@ -1,7 +1,7 @@
 from pathlib import Path
 from libgit import Repository
 from log import create_logger, reset_log_file
-from conf_globals import G_LOG_LEVEL, G_THREAD_NUM_WORKERS
+from conf_globals import G_LOG_LEVEL, THREAD_TIMEOUT_SECONDS
 from concurrent.futures import ThreadPoolExecutor
 
 logger = create_logger("src.main", G_LOG_LEVEL)
@@ -11,25 +11,7 @@ to = (Path(__name__).parent.parent / "tests/gitclone/repos").resolve()
 
 def clone_all_task(repo: Repository, to: Path):
     repo.clone_from(to)
-    
-    # for branch in repo.repo_branches:
-    #     repo.clone_from(to, branch=branch)
-        
-    # return
-    
-    with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
-        logger.info(f"Submitting clone_from for branches {', '.join(branch.name for branch in repo.repo_branches)} with {G_THREAD_NUM_WORKERS=}")
-        futures = [executor.submit(repo.clone_from, to, branch=branch) for branch in repo.repo_branches]
-        
-        for future in futures:
-            try:
-                f = future.result()
-                logger.info(f"{f.name} Result branch awaited successful")
-            except Exception as e:
-                logger.error(f"Error cloning repository branch {e}")
-
-        logger.info(f"Done awaiting all ({len(futures)}) futures")
-
+    repo.clone_branches()
 
 def main() -> bool:
     global repos
@@ -37,13 +19,13 @@ def main() -> bool:
     
     logger.info(f"Main Clone Directory: {to}")
 
-    with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
-        logger.info(f"Submitting clone_all_task for repositories [{', '.join(repo.name for repo in repos)}] with {G_THREAD_NUM_WORKERS=}")
+    with ThreadPoolExecutor() as executor:
+        logger.info(f"Submitting clone_all_task for repositories [{', '.join(repo.name for repo in repos)}]")
         futures = [executor.submit(clone_all_task, repo, to) for repo in repos]
         
         for future in futures:
             try:
-                f = future.result()
+                f = future.result(timeout=THREAD_TIMEOUT_SECONDS)
                 logger.info(f"{f} Result awaited successful")
             except Exception as e:
                 logger.error(f"Error cloning repository {e}")

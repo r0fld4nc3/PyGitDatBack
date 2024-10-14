@@ -2,13 +2,16 @@ import os
 import git
 import stat
 import shutil
+import requests
+import psutil
 from pathlib import Path
 from typing import Tuple, Union
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 from log import create_logger
-from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS
+from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
@@ -36,12 +39,13 @@ class Repository(git.Repo):
         self.owner: str = ""
         self.cloned_to: Path = ""
         self.repo: git.Repo = None
+        self.head_name = ""
         self.repo_branches: list[git.RemoteReference] = list()
         
         self.owner, self.name = _parse_repo_url(url)
+        self.head_name = self._get_head()
 
-    # TODO: Filter branches by commit date so we can gatekeep some branches from being cloned, referring to them as "active branches"
-    def clone_from(self, dest: Union[Path, str], branch: git.RemoteReference = None, *args, **kwargs):
+    def clone_from(self, dest: Union[Path, str], *args, **kwargs):
         """`@Override`
         
         Override method to use to clone the designated GitHub URL to disk.
@@ -69,8 +73,6 @@ class Repository(git.Repo):
             dest = Path(dest).resolve()
         else:
             dest = dest.resolve()
-
-        logger.debug(f"[{self.name}] [{branch}] Resolved destination: {dest}")
         
         if not dest.exists():
             logger.debug(f"[{self.name}] os.makedirs({dest}, exist_ok=True)")
@@ -80,39 +82,26 @@ class Repository(git.Repo):
             logger.debug(f"[{self.name}] {self.name.lower()} not in {dest}, therefore append {self.name} to {dest}")
             dest = dest / self.name
 
-        if not branch:
-            logger.debug(f"[{self.name}] No branch set, {branch=}")
-            dest_end = "main"
-        else:
-            logger.debug(f"[{self.name}] Branch set, {branch=}")
-            dest_end = branch.name.split('/', 1)[-1]
-
-        # The final destination for the specific branch inside the main dest folder
-        branch_dest = dest / dest_end
+        # The final destination for the specific branch inside the dest folder
+        clone_dest = dest / self.head_name.replace('/', '-') # Needs to be sanitised
+        if kwargs.get("branch"):
+            sanitised_trail = kwargs.get("branch").split('/', 1)[-1].replace('/', '-') # Needs to be sanitised
+            clone_dest = dest / sanitised_trail
 
         # =================================
         #             CLONING
         # =================================
-            
-        # Filter active commits
-        if branch:
-            active = self._filter_active(branch)
-            if not active:
-                logger.info(f"[{self.name}] Not cloning branch {branch.name} as it is considered inactive.")
-                return self
-            else:
-                logger.info(f"[{self.name}] Cloning branch {branch.name} as it is considered active.")
 
         # If directory exists and is a cloned repo already, rename existing to avoid conflict
-        if branch_dest.exists():
-            logger.debug(f"[{self.name}] Destination exists: {branch_dest}")
+        if clone_dest.exists():
+            logger.debug(f"[{self.name}] Destination exists: {clone_dest}")
             
-            self.cloned_to = branch_dest
-            backup_dir = self.set_backup_dir(branch_dest)
-            self.__remove_dir(branch_dest) # Remove target directory avoid fatal clone error
+            self.cloned_to = clone_dest
+            backup_dir = self.set_backup_dir(clone_dest)
+            self.__remove_dir(clone_dest) # Remove target directory avoid fatal clone error
             
             # Clone the repo/branch
-            successful_clone, _ = self.__clone_from_basecls(self.url, branch_dest, args, kwargs)
+            successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
             
             # Try to remove the backup directory after successful clone
             if successful_clone:
@@ -121,29 +110,53 @@ class Repository(git.Repo):
             else:
                 logger.warning(f"[{self.name}] Cloning was unsuccesful. Attempting to revert state.")
                 # Remove the possible lingering destination directory
-                if branch_dest.exists():
-                    self.__remove_dir(branch_dest)
+                if clone_dest.exists():
+                    self.__remove_dir(clone_dest)
                 
                 # Set backup dir back
-                backup_dir.rename(branch_dest)
+                backup_dir.rename(clone_dest)
         else:
-            successful_clone, _ = self.__clone_from_basecls(self.url, branch_dest, args, kwargs)
+            successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
 
             if successful_clone:
-                self.cloned_to = branch_dest
+                self.cloned_to = clone_dest
 
-        if not branch:
-            # Don't collect branch names if we're cloning a specific branch already
-            self.collect_branch_names()
-
-        if branch:
-            logger.info(f"[{self.name}] [{branch.name}] Clone finished.")
-        else:
-            logger.info(f"[{self.name}] Clone finished.")
+        # Don't collect branch names if we're cloning a specific branch already
+        if not kwargs.get("branch", None):
+            self.collect_branches()
 
         return self
+    
+    def clone_branches(self, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> "Repository":
+        if not self.repo_branches or not self.cloned_to or not self.repo:
+            return
 
-    def collect_branch_names(self) -> "Repository":
+        active_branches = []
+        for branch in self.repo_branches:
+            active = self._filter_active(branch, active_cutoff_days=active_cutoff_days)
+            if active:
+                logger.info(f"[{self.name}] {branch.name} is active")
+                active_branches.append(branch)
+
+        logger.info(f"[{self.name}] {len(active_branches)} active branches: {', '.join([b.name for b in active_branches])}")
+
+        optimal_workers = _determine_max_workers(load_factor=0.75)
+        with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
+            logger.info(f"Submitting clone_from for branches {', '.join(branch.name for branch in active_branches)} with {optimal_workers} workers")
+            futures = [executor.submit(self.clone_from, self.cloned_to.parent, branch=branch.name) for branch in active_branches]
+            
+            for future in futures:
+                try:
+                    f = future.result(timeout=THREAD_TIMEOUT_SECONDS)
+                    logger.info(f"{f.name} Result branch awaited successful")
+                except Exception as e:
+                    logger.error(f"Error cloning repository branch {e}")
+
+            logger.info(f"Done awaiting all ({len(futures)}) futures")
+        
+        return self
+
+    def collect_branches(self) -> "Repository":
         """From a cloned local repository, attempts to collect names of existing 
         branches and stores them in a list `self.repo_branches`. This list only 
         contains the names of branches that are not `origin/HEAD` and `origin/main`.
@@ -169,7 +182,7 @@ class Repository(git.Repo):
             logger.debug(f"[{self.name}] Repo branches ({len(self.repo_branches)}): {self.repo_branches}")
 
             # Remove origin/HEAD & main branch/master since we already have it
-            _removes = ["HEAD", "main", "master"]
+            _removes = ["HEAD", self.head_name]
             for branch in self.repo_branches:
                 if branch.name.split('/', 1)[-1] in _removes:
                     try:
@@ -181,6 +194,20 @@ class Repository(git.Repo):
         
         return self
     
+    def _get_head(self) -> str:
+        try:
+            api_url = f"https://api.github.com/repos/{self.owner}/{self.name}"
+            response = requests.get(api_url)
+            response.raise_for_status()
+
+            repo_data = response.json()
+            default_branch = repo_data.get("default_branch", "main") # Set main as fallback
+
+            return default_branch
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return ''
+
     def _filter_active(self, branch_ref: git.RemoteReference, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> bool:
         """
         Check if a branch has been active (committed to) within the given number of days.
@@ -190,29 +217,27 @@ class Repository(git.Repo):
         :return: True if the branch has commits within the cutoff period, False otherwise.
         """
         
-        if active_cutoff_days <= 0:
-            logger.debug(f"{active_cutoff_days=}")
-            return True
-        
         # Branch is None or empty
         if not branch_ref:
             return False
         
-        branch = branch_ref.name
-        
-        self.repo.remote().fetch()
+        branch_name = branch_ref.name
+
+        if active_cutoff_days <= 0:
+            logger.debug(f"{active_cutoff_days=} is off. Returning {branch_ref.name} as active.")
+            return True
         
         try:
-            logger.debug(f"[{self.name}] {branch=}")
+            logger.debug(f"[{self.name}] {branch_name=}")
             commit = branch_ref.commit
             commit_date = datetime.fromtimestamp(commit.committed_date).date()
             cutoff_date = (datetime.now() - timedelta(days=active_cutoff_days)).date()
             
-            logger.info(f"[{self.name}] Commit date for branch {branch}: {commit_date}")
-            logger.debug(f"[{self.name}] Cutoff date for branch {branch}: {cutoff_date}")
+            logger.info(f"[{self.name}] Commit date for branch {branch_name}: {commit_date}")
+            logger.debug(f"[{self.name}] Cutoff date for branch {branch_name}: {cutoff_date}")
             
             days_ago = (datetime.now().date() - commit_date).days
-            logger.info(f"[{self.name}] Last commit for branch {branch}: {days_ago} days ago")
+            logger.info(f"[{self.name}] Last commit for branch {branch_name}: {days_ago} days ago")
             
             return commit_date >= cutoff_date
         except Exception as e:
@@ -275,3 +300,25 @@ def _rmtree_on_error(func, path, exc_info):
     else:
         logger.error(f"Raising undeletable error for path {path}")
         raise
+
+def _determine_max_workers(load_factor: float = 1.0, max_limit: int = None) -> int:
+    """
+    Determine the optimal number of workers for ThreadPoolExecutor based on system resources.
+
+    :param load_factor: A multiplier to adjust the number of threads per CPU core.
+                        Use 1.0 for a balanced ratio, higher values for more concurrency.
+    :param max_limit: An upper limit for max workers (optional), to avoid overloading the system.
+    :return: The optimal number of workers for ThreadPoolExecutor.
+    """
+
+    cpus = os.cpu_count()
+    available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+    optimal_workers = int(cpus * load_factor)
+    mem_limit = int(available_memory_gb * 10) # ~100 MB per worker
+
+    if max_limit is not None:
+        optimal_workers = min(optimal_workers, max_limit)
+
+    optimal_workers = min(optimal_workers, mem_limit)
+
+    return max(1, optimal_workers)
