@@ -163,9 +163,12 @@ class Repository(git.Repo):
 
             # Remove origin/HEAD & main branch/master since we already have it
             logger.info(f"[{self.name}] Deleting origin/HEAD from branch list")
-            self.repo_branches.remove("origin/HEAD")
-            self.repo_branches.remove("origin/main")   # Keep?
-            self.repo_branches.remove("origin/master") # Keep?
+            _removes = ["origin/HEAD", "origin/main", "origin/master"]
+            for r in _removes:    
+                try:
+                    self.repo_branches.remove(r)
+                except ValueError:
+                    logger.info(f"{r} not in branches")
             
             for idx, value in enumerate(self.repo_branches):
                 # Fix origin/name so path is correct
