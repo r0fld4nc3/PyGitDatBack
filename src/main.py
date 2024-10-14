@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 logger = create_logger("src.main", G_LOG_LEVEL)
 
 repos = []
-to = Path(__name__).parent.parent / "tests/gitclone/repos"
+to = (Path(__name__).parent.parent / "tests/gitclone/repos").resolve()
 
 def clone_all_task(repo: Repository, to: Path):
     repo.clone_from(to)
@@ -29,9 +29,11 @@ def clone_all_task(repo: Repository, to: Path):
 def main() -> bool:
     global repos
     global to
+    
+    logger.info(f"Main Clone Directory: {to}")
 
     with ThreadPoolExecutor(max_workers=G_THREAD_NUM_WORKERS) as executor:
-        logger.info(f"Submitting clone_all_task for repositories {', '.join(repo.name for repo in repos)} with {G_THREAD_NUM_WORKERS=}")
+        logger.info(f"Submitting clone_all_task for repositories [{', '.join(repo.name for repo in repos)}] with {G_THREAD_NUM_WORKERS=}")
         futures = [executor.submit(clone_all_task, repo, to) for repo in repos]
         
         for future in futures:
