@@ -41,6 +41,7 @@ class Repository(git.Repo):
         self.repo: git.Repo = None
         self.head_name = ""
         self.repo_branches: list[git.RemoteReference] = list()
+        self.active_branches: list[git.RemoteReference] = list()
         
         self.owner, self.name = _parse_repo_url(url)
         self.head_name = self._get_head()
@@ -127,23 +128,19 @@ class Repository(git.Repo):
 
         return self
     
-    def clone_branches(self, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> "Repository":
+    def clone_branches(self, only_active=False) -> "Repository":
         if not self.repo_branches or not self.cloned_to or not self.repo:
             return
-
-        active_branches = []
-        for branch in self.repo_branches:
-            active = self._filter_active(branch, active_cutoff_days=active_cutoff_days)
-            if active:
-                logger.info(f"[{self.name}] {branch.name} is active")
-                active_branches.append(branch)
-
-        logger.info(f"[{self.name}] {len(active_branches)} active branches: {', '.join([b.name for b in active_branches])}")
+        
+        branch_list = self.repo_branches
+        if only_active:
+            branch_list = self.active_branches
+            logger.info(f"[{self.name}] {only_active=}")
 
         optimal_workers = _determine_max_workers(load_factor=0.75)
         with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
-            logger.info(f"Submitting clone_from for branches {', '.join(branch.name for branch in active_branches)} with {optimal_workers} workers")
-            futures = [executor.submit(self.clone_from, self.cloned_to.parent, branch=branch.name) for branch in active_branches]
+            logger.info(f"Submitting clone_from for branches {', '.join(branch.name for branch in branch_list)} with {optimal_workers} workers")
+            futures = [executor.submit(self.clone_from, self.cloned_to.parent, branch=branch.name) for branch in branch_list]
             
             for future in futures:
                 try:
@@ -191,7 +188,26 @@ class Repository(git.Repo):
                         logger.info(f"{branch.name} not in branches")
             
             logger.info(f"[{self.name}] {len(self.repo_branches)} branches for Repository {self.name}: {self.repo_branches}")
+
+            self.collect_active_branches()
         
+        return self
+    
+    def collect_active_branches(self, active_cutoff_days:int = COMMIT_CUTOFF_DAYS) -> "Repository":
+        if not self.repo_branches:
+            logger.info(f"[{self.name}] Repo branches is empty, no active to collect")
+            return self
+
+        self.active_branches.clear()
+
+        for branch in self.repo_branches:
+            active = self._filter_active(branch, active_cutoff_days=active_cutoff_days)
+            if active:
+                logger.info(f"[{self.name}] {branch.name} is active")
+                self.active_branches.append(branch)
+
+        logger.info(f"[{self.name}] {len(self.active_branches)} active branches: {', '.join([b.name for b in self.active_branches])}")
+
         return self
     
     def _get_head(self) -> str:
