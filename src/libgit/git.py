@@ -15,67 +15,10 @@ from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
-def parse_repo_url(url: str) -> Tuple[str, str]:
-    logger.info(f"Parsing URL {url}")
-    owner: str = ""
-    name: str = ""
-    
-    parsed = urlparse(url)
-    _path = parsed.path
-    _path_split = [i for i in _path.split('/') if i] # Also remove empty values
+API_GITHUB_NETLOC = "https://api.github.com"
+API_GITHUB_REPOS = f"{API_GITHUB_NETLOC}/repos"
+API_EXT_GITHUB_BRANCHES = "branches"
 
-    if len(_path_split) > 1:
-        owner = _path_split[0]
-        name = _path_split[1]
-
-    return owner, name
-
-def validate_github_url(url: str) -> bool:
-    """Validates a URL to be of family GitHub and if it exists on the network
-
-    Accepted domain(s) are
-    * `github.com`
-    
-    :return: `True` if domain is valid from accepted domains and repository is accessible.
-    """
-
-    logger.info(f"Validating URL {url}")
-    
-    accepted_domains = ["github.com"]
-
-    parsed = urlparse(url)
-    owner, name = parse_repo_url(url)
-    logger.debug(f"{parsed=}")
-    netloc = parsed.netloc
-    path = parsed.path
-
-    if netloc in accepted_domains:
-        if not path:
-            logger.info(f"Path must exist and not be a bare url.")
-            return False
-        
-        # Some path exists. Validate if accessible and is valid for repo
-        api_url = f"https://api.github.com/repos/{owner}/{name}"
-        if not owner or not name:
-            logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
-            return False
-        
-        response = requests.get(api_url)
-        if response.status_code == 200:
-            logger.info(f"({response.status_code}) {url} is a valid repository")
-            return True
-        
-        if response.status_code == 404:
-            logger.info(f"({response.status_code}) {url} does not exist")
-        elif response.status_code == 403:
-            logger.info(f"({response.status_code}) {url} rate limit exceeded")
-        else:
-            logger.info(f"Error or unhandled branch for ({response.status_code}) {url}")
-        
-    else:
-        logger.info(f"{netloc} is not a valid {accepted_domains} domain.")
-    
-    return False
 
 class Repository(git.Repo):
     def __init__(self, url, *args, **kwargs):
@@ -258,7 +201,7 @@ class Repository(git.Repo):
     
     def _get_head(self) -> str:
         try:
-            api_url = f"https://api.github.com/repos/{self.owner}/{self.name}"
+            api_url = f"{API_GITHUB_REPOS}/{self.owner}/{self.name}"
             response = requests.get(api_url)
             response.raise_for_status()
 
@@ -363,6 +306,74 @@ def _rmtree_on_error(func, path, exc_info):
         logger.error(f"Raising undeletable error for path {path}")
         raise
 
+
+def parse_repo_url(url: str) -> Tuple[str, str]:
+    logger.info(f"Parsing URL {url}")
+    owner: str = ""
+    name: str = ""
+    
+    parsed = urlparse(url)
+    _path = parsed.path
+    _path_split = [i for i in _path.split('/') if i] # Also remove empty values
+
+    if len(_path_split) > 1:
+        owner = _path_split[0]
+        name = _path_split[1]
+
+    logger.info(f"{owner=}")
+    logger.info(f"{name=}")
+
+    return owner, name
+
+def validate_github_url(url: str) -> bool:
+    """Validates a URL to be of family GitHub and if it exists on the network
+
+    Accepted domain(s) are
+    * `github.com`
+    
+    :return: `True` if domain is valid from accepted domains and repository is accessible.
+    """
+
+    logger.info(f"Validating URL {url}")
+    
+    accepted_domains = ["github.com"]
+
+    parsed = urlparse(url)
+    owner, name = parse_repo_url(url)
+    logger.debug(f"{parsed=}")
+    netloc = parsed.netloc
+    path = parsed.path
+
+    if netloc in accepted_domains:
+        if not path:
+            logger.info(f"Path must exist and not be a bare url.")
+            return False
+        
+        # Some path exists. Validate if accessible and is valid for repo
+        api_url = f"{API_GITHUB_REPOS}/{owner}/{name}"
+        if not owner or not name:
+            logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
+            return False
+        
+        """response = requests.get(api_url)
+        if response.status_code == 200:
+            logger.info(f"({response.status_code}) {url} is a valid repository")
+            return True
+        
+        if response.status_code == 404:
+            logger.info(f"({response.status_code}) {url} does not exist")
+        elif response.status_code == 403:
+            logger.info(f"({response.status_code}) {url} rate limit exceeded")
+        else:
+            logger.info(f"Error or unhandled branch for ({response.status_code}) {url}")"""
+        
+        return True
+        
+    else:
+        logger.info(f"{netloc} is not a valid {accepted_domains} domain.")
+    
+    return False
+
 def _determine_max_workers(load_factor: float = 1.0, max_limit: int = None) -> int:
     """
     Determine the optimal number of workers for ThreadPoolExecutor based on system resources.
@@ -384,3 +395,53 @@ def _determine_max_workers(load_factor: float = 1.0, max_limit: int = None) -> i
     optimal_workers = min(optimal_workers, mem_limit)
 
     return max(1, optimal_workers)
+
+def get_branches_and_commits(repo) -> Tuple[int, dict]:
+    owner, repo = parse_repo_url(repo)
+
+    # Endpoint API to list branches
+    api_url = f"{API_GITHUB_REPOS}/{owner}/{repo}/{API_EXT_GITHUB_BRANCHES}"
+    logger.info(f"{api_url=}")
+
+    ret_info = {}
+
+    response = requests.get(api_url)
+    logger.info(f"Response Code: {response.status_code}")
+    
+    if response.status_code == 200:
+        branches_info = response.json()
+
+        for branch in branches_info:
+            branch_name = branch["name"]
+            last_commit_sha = branch["commit"]["sha"]
+            last_commit_url = branch["commit"]["url"]
+
+            ret_info[branch_name] = {
+                "last_commit_sha": last_commit_sha,
+                "last_commit_url": last_commit_url,
+                "last_commit_date": ""
+                }
+
+            # Fetch commit details
+            commit_response = requests.get(last_commit_url)
+            if commit_response.status_code == 200:
+                commit_info = commit_response.json()
+                commit_date = commit_info["commit"]["committer"]["date"]
+                ret_info[branch_name]["last_commit_date"] = commit_date
+
+    elif response.status_code == 403:
+        logger.info(f"API rate limit exceeded")
+
+    logger.info(f"{ret_info}")
+
+    return response.status_code, ret_info
+
+
+def api_status():
+    api_url = API_GITHUB_NETLOC
+    logger.info(f"{api_url=}")
+
+    response = requests.get(api_url)
+    logger.info(f"Response Code: {response.status_code}")
+
+    return response.status_code
