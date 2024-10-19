@@ -4,6 +4,8 @@ from log import create_logger, reset_log_file
 from conf_globals import G_LOG_LEVEL, THREAD_TIMEOUT_SECONDS
 from concurrent.futures import ThreadPoolExecutor
 
+from ui import GitDatBackUI
+
 logger = create_logger("src.main", G_LOG_LEVEL)
 
 repos = []
@@ -36,4 +38,6 @@ def main() -> bool:
 
 if __name__ == "__main__":
     reset_log_file()
-    main()
+    app = GitDatBackUI()
+    app.show()
+    # main()
