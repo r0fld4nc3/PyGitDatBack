@@ -15,7 +15,8 @@ from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
-def _parse_repo_url(url: str) -> Tuple[str, str]:
+def parse_repo_url(url: str) -> Tuple[str, str]:
+    logger.info(f"Parsing URL {url}")
     owner: str = ""
     name: str = ""
     
@@ -26,10 +27,55 @@ def _parse_repo_url(url: str) -> Tuple[str, str]:
     if len(_path_split) > 1:
         owner = _path_split[0]
         name = _path_split[1]
-    else:
-        owner = _path_split[0]
 
     return owner, name
+
+def validate_github_url(url: str) -> bool:
+    """Validates a URL to be of family GitHub and if it exists on the network
+
+    Accepted domain(s) are
+    * `github.com`
+    
+    :return: `True` if domain is valid from accepted domains and repository is accessible.
+    """
+
+    logger.info(f"Validating URL {url}")
+    
+    accepted_domains = ["github.com"]
+
+    parsed = urlparse(url)
+    owner, name = parse_repo_url(url)
+    logger.debug(f"{parsed=}")
+    netloc = parsed.netloc
+    path = parsed.path
+
+    if netloc in accepted_domains:
+        if not path:
+            logger.info(f"Path must exist and not be a bare url.")
+            return False
+        
+        # Some path exists. Validate if accessible and is valid for repo
+        api_url = f"https://api.github.com/repos/{owner}/{name}"
+        if not owner or not name:
+            logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
+            return False
+        
+        response = requests.get(api_url)
+        if response.status_code == 200:
+            logger.info(f"({response.status_code}) {url} is a valid repository")
+            return True
+        
+        if response.status_code == 404:
+            logger.info(f"({response.status_code}) {url} does not exist")
+        elif response.status_code == 403:
+            logger.info(f"({response.status_code}) {url} rate limit exceeded")
+        else:
+            logger.info(f"Error or unhandled branch for ({response.status_code}) {url}")
+        
+    else:
+        logger.info(f"{netloc} is not a valid {accepted_domains} domain.")
+    
+    return False
 
 class Repository(git.Repo):
     def __init__(self, url, *args, **kwargs):
@@ -43,7 +89,7 @@ class Repository(git.Repo):
         self.repo_branches: list[git.RemoteReference] = list()
         self.active_branches: list[git.RemoteReference] = list()
         
-        self.owner, self.name = _parse_repo_url(url)
+        self.owner, self.name = parse_repo_url(url)
         self.head_name = self._get_head()
 
     def clone_from(self, dest: Union[Path, str], *args, **kwargs):
