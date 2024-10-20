@@ -260,6 +260,16 @@ class GitDatBackUI(QWidget):
         self.remove_selected_button.clicked.connect(self.remove_selected_entries)
         self.remove_selected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
+        # Select Selected Button
+        self.set_selection_selected_button = QPushButton("Select Selected")
+        self.set_selection_selected_button.clicked.connect(self.set_selection_selected)
+        self.set_selection_selected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        # Deselect Selected Button
+        self.set_selection_deselected_button = QPushButton("Deselect Selected")
+        self.set_selection_deselected_button.clicked.connect(self.set_selection_deselected)
+        self.set_selection_deselected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
         # Select All Button
         self.set_all_selected_button = QPushButton("Select All")
         self.set_all_selected_button.clicked.connect(self.set_all_selected)
@@ -296,6 +306,8 @@ class GitDatBackUI(QWidget):
         self.input_layout.addWidget(self.submit_button)
 
         # Add widget to actions_layout
+        self.actions_layout.addWidget(self.set_selection_selected_button)
+        self.actions_layout.addWidget(self.set_selection_deselected_button)
         self.actions_layout.addWidget(self.set_all_selected_button)
         self.actions_layout.addWidget(self.set_all_deselected_button)
         self.actions_layout.addStretch()
@@ -484,15 +496,35 @@ class GitDatBackUI(QWidget):
             self.entries.remove(entry_to_remove)
             self.entry_table.removeRow(index.row())
 
+    def set_selection_selected(self):
+        selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
+        logger.debug(f"{selected_indices=}")
+
+        for index in selected_indices:
+            entry = self.entries[index]
+            entry.set_pull(True)
+
+        self.tell("Selected selection.")
+
+    def set_selection_deselected(self):
+        selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
+        logger.debug(f"{selected_indices=}")
+
+        for index in selected_indices:
+            entry = self.entries[index]
+            entry.set_pull(False)
+
+        self.tell("Deselected selection.")
+
     def set_all_selected(self):
         for entry in self.iter_entries():
-            entry.pull_checkbox.setChecked(True)
+            entry.set_pull(True)
 
         self.tell("Selected all.")
 
     def set_all_deselected(self):
         for entry in self.iter_entries():
-            entry.pull_checkbox.setChecked(False)
+            entry.set_pull(False)
 
         self.tell("Deselected all.")
 
