@@ -9,18 +9,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
 
-from log import create_logger
 from . import __VERSION__
-from conf_globals import G_LOG_LEVEL
-from libgit import Repository
 from .utils import get_screen_info
+from conf_globals import G_LOG_LEVEL
+from log import create_logger
+from settings import Settings
+from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, api_status
 
-
 logger = create_logger("src.ui.ui_main", G_LOG_LEVEL)
-
-repos = []
-to_path = (Path(__name__).parent.parent / "tests/gitclone/repos").resolve()
 
 
 class TaskQueue(QObject):
@@ -150,6 +147,9 @@ class TableEntry(QWidget):
 
         self.setLayout(layout)
 
+    def set_pull(self, state: bool):
+        self.pull_checkbox.setChecked(state)
+
     def set_timestamp_now(self):
         """Sets the current timestamp on the timestamp_item."""
         _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
@@ -160,6 +160,11 @@ class TableEntry(QWidget):
         former_url = self.url_label.text()
         self.url_label.setText(url)
         logger.info(f"Set new URL: {url} for former {former_url}")
+
+    def set_timestamp(self, timestamp: str):
+        """Sets the timestamp on the timestamp_item."""
+        self.timestamp_label.setText(timestamp)
+        logger.info(f"Set timestamp {timestamp} of widget {self.timestamp_label}")
 
     def set_branches(self, branches_to_set: list):
         self.branches_to_pull = branches_to_set
@@ -193,6 +198,11 @@ class GitDatBackUI(QWidget):
             self.app = QApplication.instance()
 
         super().__init__()
+
+        self.settings = Settings()
+        self.settings.load_config() # Load the config
+
+        self.backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
         # Set UI constraints
         self.setWindowTitle("Git Dat Back")
@@ -266,7 +276,8 @@ class GitDatBackUI(QWidget):
         # Backup Path Input
         self.backup_path_input = QLineEdit()
         self.backup_path_input.setPlaceholderText("Root folder for repositories...")
-        self.backup_path_input.setText(str(to_path))
+        self.backup_path_input.setText(str(self.backup_path))
+        self.backup_path_input.editingFinished.connect(self.set_backup_path)
 
         # Backup Path Pick Button
         self.backup_back_button = QPushButton("Pick")
@@ -309,11 +320,28 @@ class GitDatBackUI(QWidget):
 
         self.setLayout(self.main_layout)
 
-        for repo in repos:
-            self.url_input.setText(repo)
-            self.add_entry()
+        self.load_saved_repos()
+
+    def load_saved_repos(self):
+        if not self.settings:
+            logger.warning(f"No settings class??")
+            return
+        
+        repos = self.settings.get_repos()
+
+        for repo_url, info in repos.items():
+            do_pull = info.get(Settings.KEY_DO_PULL)
+            timestamp = info.get(Settings.KEY_LAST_PULLED)
+            branches = info.get(Settings.KEY_BRANCHES)
+            
+            self.add_to_table(repo_url, do_pull, timestamp, branches=branches)
+
+        self.tell("Status: Ready")
+
+        self.url_input.clear()
 
     def add_entry(self):
+        # Manual user entry submission
         url = self.url_input.text().strip()
 
         if not url:
@@ -329,6 +357,19 @@ class GitDatBackUI(QWidget):
             self.tell(f"Unable to validate {url}")
             return
         
+        entry = self.add_to_table(url, True, "n/a")
+
+        # Save to settings
+        self.settings.save_repo(url, entry.pull_checkbox.isChecked())
+
+        # branch_task = BranchTask(url, lambda res: self._update_entry_branches(entry, res))
+        # self.task_queue.add_task(branch_task)
+
+        # entry.branches_label.setText("Fecthing...")
+
+        self.url_input.clear()
+
+    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "", branches: list = []) -> TableEntry:
         entry = TableEntry(url)
 
         row_pos = self.entry_table.rowCount()
@@ -339,17 +380,23 @@ class GitDatBackUI(QWidget):
         self.entry_table.setCellWidget(row_pos, 2, entry.branches_label_widget)
         self.entry_table.setCellWidget(row_pos, 3, entry.timestamp_widget)
 
+        # Handle pull checkbox
+        entry.set_pull(do_pull)
+
+        # Handle timestamp
+        if timestamp:
+            entry.set_timestamp(timestamp)
+
+        # Handle branches
+        if branches:
+            entry.set_branches(branches)
+
         self.entries.append(entry)
 
         logger.info(f"Added entry: {url}")
         self.tell(f"Added entry: {url}")
 
-        # branch_task = BranchTask(url, lambda res: self._update_entry_branches(entry, res))
-        # self.task_queue.add_task(branch_task)
-
-        # entry.branches_label.setText("Fecthing...")
-
-        self.url_input.clear()
+        return entry
 
     def _update_entry_branches(self, entry, result):
         # TODO: When we are finally saving to a file, check if there are branches saved before we pull from the api
@@ -413,7 +460,7 @@ class GitDatBackUI(QWidget):
 
                 if input_dialog.exec_() == QDialog.Accepted:
                     branches = input_dialog.textValue()
-                    entry_item.set_branches(branches.split(','))
+                    entry_item.set_branches([b.strip() for b in branches.split(',')])
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
@@ -450,14 +497,21 @@ class GitDatBackUI(QWidget):
         self.tell("Deselected all.")
 
     def pick_backup_path(self):
-        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(to_path))
-        folder_path = Path(choice).resolve()
+        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.backup_path))
 
         if choice:
-            self.backup_path_input.setText(str(folder_path))
-            logger.info(f"Backup path: {choice}")
+            self.set_backup_path()
         else:
             logger.info(f"User aborted backup path selection.")
+
+    def set_backup_path(self):
+        choice = self.backup_path_input.text()
+
+        if choice:
+            folder_path = Path(self.backup_path_input.text()).resolve()
+            self.backup_path_input.setText(str(folder_path))
+            self.backup_path = folder_path
+            logger.info(f"Backup path: {folder_path}")
 
     def tell(self, what: str):
         self.info_label.setText(what.strip())
@@ -481,7 +535,7 @@ class GitDatBackUI(QWidget):
             return
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.backup_path_input.text(), entry)
+            clone_task = CloneRepoTask(repo, self.backup_path, entry)
 
             # Connect the signals
             clone_task.signals.finished.connect(self.on_clone_success)
@@ -508,6 +562,23 @@ class GitDatBackUI(QWidget):
     def closeEvent(self, event):
         logger.info("Application is closing. Shutting down procedure")
         self.task_queue.stop()
+        
+        # Settings save
+        self.settings.set_save_root_dir(self.backup_path)
+        
+        # Save state of each widget entry in the table
+        for entry in self.iter_entries():
+            repo_url = entry.url_label.text()
+            branches = entry.branches_to_pull
+            do_pull = entry.pull_checkbox.isChecked()
+            timestamp = entry.timestamp_label.text()
+            if timestamp == "n/a" or not timestamp:
+                timestamp = ""
+
+            self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+        self.settings.save_config()
+        
+        logger.info("Shutdown")
         event.accept()
 
     def _adjust_app_size(self):

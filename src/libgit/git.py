@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from log import create_logger
 from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
+from utils import get_env_tempdir
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
@@ -32,8 +33,8 @@ class Repository(git.Repo):
         self.repo_branches: list[git.RemoteReference] = list()
         self.active_branches: list[git.RemoteReference] = list()
         
-        self.owner, self.name = parse_repo_url(url)
-        self.head_name = self._get_head()
+        self.owner, self.name = parse_owner_name_from_url(url)
+        # self.head_name = self._get_head()
 
     def clone_from(self, dest: Union[Path, str], *args, **kwargs):
         """`@Override`
@@ -307,12 +308,17 @@ def _rmtree_on_error(func, path, exc_info):
         raise
 
 
-def parse_repo_url(url: str) -> Tuple[str, str]:
+def parse_owner_name_from_url(url: str) -> Tuple[str, str]:
     logger.info(f"Parsing URL {url}")
     owner: str = ""
     name: str = ""
     
     parsed = urlparse(url)
+    netloc = parsed.netloc
+
+    if netloc.lower() != API_GITHUB_NETLOC:
+        logger.warning(f"{url} netloc ({netloc} mismatch with API {API_GITHUB_NETLOC})")
+
     _path = parsed.path
     _path_split = [i for i in _path.split('/') if i] # Also remove empty values
 
@@ -339,7 +345,7 @@ def validate_github_url(url: str) -> bool:
     accepted_domains = ["github.com"]
 
     parsed = urlparse(url)
-    owner, name = parse_repo_url(url)
+    owner, name = parse_owner_name_from_url(url)
     logger.debug(f"{parsed=}")
     netloc = parsed.netloc
     path = parsed.path
@@ -397,7 +403,7 @@ def _determine_max_workers(load_factor: float = 1.0, max_limit: int = None) -> i
     return max(1, optimal_workers)
 
 def get_branches_and_commits(repo) -> Tuple[int, dict]:
-    owner, repo = parse_repo_url(repo)
+    owner, repo = parse_owner_name_from_url(repo)
 
     # Endpoint API to list branches
     api_url = f"{API_GITHUB_REPOS}/{owner}/{repo}/{API_EXT_GITHUB_BRANCHES}"
@@ -436,6 +442,30 @@ def get_branches_and_commits(repo) -> Tuple[int, dict]:
 
     return response.status_code, ret_info
 
+def get_branches_shallow_clone(url: str) -> dict:
+    temp_dir = get_env_tempdir() / "pygitdatback" / "tempclone"
+
+    branches = {}
+    
+    try:
+        logger.info(f"Cloning {url} to {temp_dir}")
+        repo = git.Repo.clone_from(url, temp_dir, depth=1)
+
+        for ref in repo.remote().refs:
+            branch_name = ref.remote_head
+            last_commmit_sha = ref.commit.hexsha
+            last_commmit_date = ref.commit.committed_datetime.isoformat()
+
+            branches[branch_name] = {
+                "last_commit_sha": last_commmit_sha,
+                "last_commit_date": last_commmit_date
+            }
+    except Exception as e:
+        logger.error(f"{e}")
+
+    logger.debug(f"{branches=}")
+    
+    return branches
 
 def api_status():
     api_url = API_GITHUB_NETLOC
