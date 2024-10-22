@@ -147,14 +147,23 @@ class TableEntry(QWidget):
 
         self.setLayout(layout)
 
+    def get_pull(self) -> bool:
+        return self.pull_checkbox.isChecked()
+
     def set_pull(self, state: bool):
         self.pull_checkbox.setChecked(state)
+
+    def get_timestamp(self) -> str:
+        return self.timestamp_label.text()
 
     def set_timestamp_now(self):
         """Sets the current timestamp on the timestamp_item."""
         _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
         self.timestamp_label.setText(_timestamp)
         logger.info(f"Set timestamp {_timestamp} of widget {self.timestamp_label}")
+
+    def get_url(self) -> str:
+        return self.url_label.text()
 
     def set_url(self, url):
         former_url = self.url_label.text()
@@ -165,6 +174,9 @@ class TableEntry(QWidget):
         """Sets the timestamp on the timestamp_item."""
         self.timestamp_label.setText(timestamp)
         logger.info(f"Set timestamp {timestamp} of widget {self.timestamp_label}")
+
+    def get_branches(self) -> list:
+        return self.branches_to_pull
 
     def set_branches(self, branches_to_set: list):
         self.branches_to_pull = branches_to_set
@@ -181,10 +193,10 @@ class TableEntry(QWidget):
         """
 
         ret = {
-            "do_pull": self.pull_checkbox.isChecked(),
-            "branches": self.branches_to_pull,
-            "url": self.url_label.text(),
-            "ts": self.timestamp_label.text()
+            "do_pull": self.get_pull(),
+            "branches": self.get_branches(),
+            "url": self.get_url(),
+            "ts": self.get_timestamp()
         }
 
         return ret
@@ -439,7 +451,7 @@ class GitDatBackUI(QWidget):
             if col == clickable_cols[0]:
                 item = self.entry_table.item(row, col)
                 entry_item = self.entries[row]
-                entry_url = entry_item.props().get("url")
+                entry_url = entry_item.get_url()
                 prefilled = entry_url
 
                 logger.debug(f"Entry: {entry_item} {entry_url}")
@@ -455,10 +467,13 @@ class GitDatBackUI(QWidget):
                     new_url = input_dialog.textValue()
                     if validate_github_url(new_url):
                         entry_item.set_url(new_url)
+                        logger.info(f"Edited {entry_url} to {new_url}")
+                        self.tell(f"Edited {entry_url} to {new_url}")
             elif col == clickable_cols[1]:
                 item = self.entry_table.item(row, col)
                 entry_item = self.entries[row]
-                entry_branches = entry_item.props().get("branches")
+                entry_url = entry_item.get_url()
+                entry_branches = entry_item.get_branches()
                 prefilled = ', '.join(entry_branches)
 
                 logger.debug(f"Entry: {entry_item} {entry_branches}")
@@ -471,8 +486,10 @@ class GitDatBackUI(QWidget):
                 input_dialog.resize(400, 200)
 
                 if input_dialog.exec_() == QDialog.Accepted:
-                    branches = input_dialog.textValue()
-                    entry_item.set_branches([b.strip() for b in branches.split(',')])
+                    branches = [b.strip() for b in input_dialog.textValue().split(',')]
+                    entry_item.set_branches(branches)
+                    logger.info(f"Updated branches of {entry_url}: {branches}")
+                    self.tell(f"Updated branches of {entry_url}: {branches}")
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
@@ -553,11 +570,8 @@ class GitDatBackUI(QWidget):
         repos = []
 
         for entry in self.iter_entries():
-            props = entry.props()
-            logger.debug(f"{props}")
-            
-            is_checked = props.get("do_pull")
-            url = props.get("url")
+            is_checked = entry.get_pull()
+            url = entry.get_url()
             
             if is_checked:
                 repos.append((Repository(url), entry))
