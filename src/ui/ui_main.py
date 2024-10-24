@@ -5,7 +5,8 @@ from queue import Queue
 from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, QFileDialog
+    QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, 
+    QFileDialog, QDialogButtonBox, QTextEdit
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
 
@@ -16,8 +17,41 @@ from log import create_logger
 from settings import Settings
 from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, api_status
+import systemd
 
-logger = create_logger("src.ui.ui_main", G_LOG_LEVEL)
+logger = create_logger(__name__, G_LOG_LEVEL)
+
+
+class AlertDialog(QDialog):
+    def __init__(self, alert: str, title: str="Alert"):
+        super().__init__()
+
+        self.alert_text = alert
+        self.title = title
+
+        self.setWindowTitle(title)
+
+        self.resize(QSize(400, 200))
+
+        QBtn = (
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+
+        self.button_box = QDialogButtonBox(QBtn)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        
+        self.message_box = QTextEdit(self.alert_text)
+        self.message_box.setEnabled(False)
+        self.message_box.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(self.message_box)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+        self.exec()
 
 
 class TaskQueue(QObject):
@@ -218,7 +252,7 @@ class GitDatBackUI(QWidget):
         
         # Set UI constraints
         self.setWindowTitle("Git Dat Back")
-        self.resize(QSize(810, 400))
+        self.resize(QSize(810, 450))
 
         # Tasks
         self.task_queue = TaskQueue()
@@ -310,6 +344,18 @@ class GitDatBackUI(QWidget):
         self.pull_button = QPushButton("Pull Repos")
         self.pull_button.clicked.connect(self.pull_repos)
 
+        # Register Services Buttons layout
+        self.register_services_layout = QHBoxLayout()
+
+        # Register Service Button
+        self.register_service_button = QPushButton("Register Service")
+        self.register_service_button.clicked.connect(self.register_background_service)
+
+        # Unregister Service Button
+        self.unregister_service_button = QPushButton("Unregister Service")
+        self.unregister_service_button.clicked.connect(self.unregister_background_service)
+
+        # Version Label
         self.label_version = QLabel('v' + '.'.join([str(x) for x in __VERSION__]))
         self.label_version.setAlignment(Qt.AlignCenter)
 
@@ -331,6 +377,11 @@ class GitDatBackUI(QWidget):
         # Add widgets to backup path layout
         self.backup_path_layout.addWidget(self.backup_path_input)
         self.backup_path_layout.addWidget(self.backup_back_button)
+
+        # Add widgets to register services layout
+        self.register_services_layout.addWidget(self.register_service_button)
+        self.register_services_layout.addWidget(self.unregister_service_button)
+        self.register_services_layout.addStretch()
         
         # Add widgets to main layout
         self.main_layout.addLayout(self.input_layout)
@@ -340,6 +391,7 @@ class GitDatBackUI(QWidget):
         self.main_layout.addLayout(self.remove_button_layout)
         self.main_layout.addLayout(self.backup_path_layout)
         self.main_layout.addWidget(self.pull_button)
+        self.main_layout.addLayout(self.register_services_layout)
         self.main_layout.addWidget(self.label_version)
 
         self.setLayout(self.main_layout)
@@ -489,7 +541,7 @@ class GitDatBackUI(QWidget):
                     branches = [b.strip() for b in input_dialog.textValue().split(',')]
                     entry_item.set_branches(branches)
                     logger.info(f"Updated branches of {entry_url}: {branches}")
-                    self.tell(f"Updated branches of {entry_url}: {branches}")
+                    self.tell(f"Updated branches of {entry_url.split('/')[-1]}: {branches}")
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
@@ -575,6 +627,7 @@ class GitDatBackUI(QWidget):
             
             if is_checked:
                 repos.append((Repository(url), entry))
+                entry.set_timestamp("Fetching...")
 
         if not repos:
             self.tell("Nothing is checked.")
@@ -595,10 +648,16 @@ class GitDatBackUI(QWidget):
         for entry in self.entries:  
             if entry.url_label.text() == repo_name:
                 entry.set_timestamp_now()
+
+        self.tell(f"Cloning completed for: {repo_name}")
                 
     def on_clone_error(self, repo_name, error_msg):
         logger.error(f"Error cloning repository {repo_name}: {error_msg}")
         self.tell(f"Error cloning {repo_name}: {error_msg}")
+
+        for entry in self.entries:  
+            if entry.url_label.text() == repo_name:
+                entry.set_timestamp("Error")
 
     def show(self):
         super().show()
@@ -626,6 +685,22 @@ class GitDatBackUI(QWidget):
         
         logger.info("Shutdown")
         event.accept()
+
+    def register_background_service(self):
+        success, status = systemd.register_service()
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to register.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+
+    def unregister_background_service(self):            
+        success, status = systemd.unregister_service()
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def _adjust_app_size(self):
         screen_info = get_screen_info(self.app)

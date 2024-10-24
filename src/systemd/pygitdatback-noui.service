@@ -1,0 +1,15 @@
+[Unit]
+Description=PyGitDatBack No-UI Background Service
+After=network.target
+
+[Service]
+Type=Simple
+ExecStart={{PYTHON_PATH}} {{PATH_TO_ENTRY_POINT}}
+WorkingDirectory={{PATH_TO_PROJECT}}
+User=user
+Group=user
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

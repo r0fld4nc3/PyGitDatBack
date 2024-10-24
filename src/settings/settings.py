@@ -27,6 +27,7 @@ logger = create_logger("Settings", G_LOG_LEVEL)
 
 class Settings:
     KEY_SAVE_TO = "save_to"
+    KEY_SERVICE_SET = "background_service_set"
     KEY_REPOS = "repos"
     KEY_DO_PULL = "do_pull"
     KEY_LAST_PULLED = "last_pulled"
@@ -35,6 +36,7 @@ class Settings:
     def __init__(self):
         self.settings = {
             self.KEY_SAVE_TO: "",
+            self.KEY_SERVICE_SET: False,
             self.KEY_REPOS: {}
         }
         self._config_file_name = "pygitdatback-settings.json"
@@ -106,6 +108,13 @@ class Settings:
             logger.info(f"Saved config {self.config_file}")
 
         return self.config_file
+    
+    def get_background_service_status(self) -> bool:
+        return self.settings.get(self.KEY_SERVICE_SET)
+    
+    def set_background_service_status(self, status: bool):
+        self.settings[self.KEY_SERVICE_SET] = status
+        logger.info(f"Set background service status to: {status}")
 
     def load_config(self) -> dict:
         if self.config_dir == '' or not Path(self.config_dir).exists()\

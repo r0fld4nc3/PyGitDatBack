@@ -113,8 +113,8 @@ class Repository(git.Repo):
                 self.cloned_to = clone_dest
 
         # Don't collect branch names if we're cloning a specific branch already
-        if not kwargs.get("branch", None):
-            self.collect_branches()
+        # if not kwargs.get("branch", None):
+            # self.collect_branches()
 
         return self
     
