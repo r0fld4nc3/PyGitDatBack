@@ -625,6 +625,9 @@ class GitDatBackUI(QWidget):
             is_checked = entry.get_pull()
             url = entry.get_url()
             
+            logger.debug(f"{url=}")
+            logger.debug(f"    {is_checked=}")
+            
             if is_checked:
                 repos.append((Repository(url), entry))
                 entry.set_timestamp("Fetching...")
@@ -641,6 +644,28 @@ class GitDatBackUI(QWidget):
             clone_task.signals.error.connect(self.on_clone_error)
 
             self.task_queue.add_task(clone_task)
+
+    @staticmethod
+    def pull_repos_no_ui():
+        logger.warning("Pull Repos lacks full implementation.")
+        repos = []
+
+        settings = Settings()
+        settings.load_config()
+
+        logger.info("Iterating saved repos...")
+        for url, info in settings.get_repos().items():
+            logger.info(f"{url}")
+            logger.info(f"{info=}")
+            if info.get("do_pull", False):
+                repos.append(Repository(url))
+                logger.info(f"Appended repo {url}")
+
+        save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        logger.info(f"Cloning to root directory: {str(save_to)}")
+        
+        for repo in repos:
+            repo.clone_from(save_to)
 
     def on_clone_success(self, repo_name):
         logger.info(f"Cloning completed for: {repo_name}")

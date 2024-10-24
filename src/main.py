@@ -27,7 +27,8 @@ def launch_ui() -> bool:
 def launch_no_ui() -> bool:
     reset_log_file()
     logger.info("Launching no GUI")
-    app = GitDatBackUI
+    GitDatBackUI.pull_repos_no_ui()
+    
 
 if __name__ == "__main__":
     main()

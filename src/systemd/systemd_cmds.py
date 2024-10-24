@@ -10,14 +10,13 @@ from utils import get_env_tempdir
 logger = create_logger(__name__, G_LOG_LEVEL)
 
 _THIS_FILE_PATH = Path(__file__).parent.resolve()
-SRC_PATH = _THIS_FILE_PATH.parent
+
+REQUIREMENTS = _THIS_FILE_PATH.parent / "requirements.txt"
 
 SYSTEMD_SYSTEM_PATH = Path("/etc/systemd/system")
 
-# VENV_PATH = _THIS_FILE_PATH.parent.parent / ".venv"
 VENV_PATH = get_env_tempdir() / "PyGitDatBack.venv"
-VENV_BIN_ACTIVATE_PATH = VENV_PATH / "bin" / "activate"
-VENV_CREATE = "python3 -m venv"
+VENV_BIN_PATH = VENV_PATH / "bin"/ "python3"
 
 SERVICE_FILE_TO_COPY = _THIS_FILE_PATH / "pygitdatback-noui.service"
 SERVICE_FILE_IN_PLACE = SYSTEMD_SYSTEM_PATH / "pygitdatback-noui.service"
@@ -44,7 +43,7 @@ def register_service() -> Tuple[bool, str]:
     _replace_service_file_vars(temp_service_file)
 
     if success:
-        cmd_to_copy = f"chmod +x {str(REGISTER_SHELL_FILE)} && {str(REGISTER_SHELL_FILE)} {str(temp_service_file)} {str(SERVICE_FILE_IN_PLACE)} {str(TIMER_FILE_TO_COPY)} {str(TIMER_FILE_IN_PLACE)}"
+        cmd_to_copy = f"chmod +x {str(REGISTER_SHELL_FILE)} && {str(REGISTER_SHELL_FILE)} {str(VENV_PATH)} {str(REQUIREMENTS)} {str(temp_service_file)} {str(SERVICE_FILE_IN_PLACE)} {str(TIMER_FILE_TO_COPY)} {str(TIMER_FILE_IN_PLACE)}"
         status = cmd_to_copy
         logger.info(status)
 
@@ -96,9 +95,7 @@ def _replace_service_file_vars(service_file_path: Path):
         if contents:
             for i, line in enumerate(contents):
                 if python_path in line:
-                    reqs = str(SRC_PATH / "requirements.txt")
-                    python_venv = f"{str(VENV_CREATE)} {VENV_PATH} && source {VENV_BIN_ACTIVATE_PATH} && pip install -r {reqs} && python3"
-                    line = line.replace(python_path, python_venv)
+                    line = line.replace(python_path, str(VENV_BIN_PATH))
                     contents[i] = line
                 
                 if service_path_to_entry_point in line:

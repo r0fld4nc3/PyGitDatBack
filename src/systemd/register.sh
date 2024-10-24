@@ -1,15 +1,25 @@
 #!/bin/bash
 
-SERVICE_FILE_IN="$1"
-SERVICE_FILE="$2"
+VENV_PATH="$1"
+REQUIREMENTS="$2"
 
-TIMER_FILE_IN="$3"
-TIMER_FILE="$4"
+SERVICE_FILE_IN="$3"
+SERVICE_FILE="$4"
 
-echo "Service File Input: "$1""
-echo "Service File Dest:  "$2""
-echo "Timer File Input:   "$3""
-echo "Timer File Dest:    "$4""
+TIMER_FILE_IN="$5"
+TIMER_FILE="$6"
+
+echo "Venv Path Setup:    "$VENV_PATH""
+echo "Venv Requirements:  "$REQUIREMENTS""
+echo "Service File Input: "$SERVICE_FILE_IN""
+echo "Service File Dest:  "$SERVICE_FILE""
+echo "Timer File Input:   "$TIMER_FILE_IN""
+echo "Timer File Dest:    "$TIMER_FILE""
+
+# Create/Setup the venv
+python3 -m venv "$VENV_PATH" 
+source "$VENV_PATH/bin/activate"
+pip install -r "$REQUIREMENTS"
 
 # Copy the service file
 if sudo cp "$SERVICE_FILE_IN" "$SERVICE_FILE" && sudo cp "$TIMER_FILE_IN" "$TIMER_FILE"; then
@@ -28,6 +38,7 @@ else
 fi
 
 # Enable the service to start on boot
+echo "sudo systemctl enable $(basename "$SERVICE_FILE")"
 if sudo systemctl enable "$(basename "$SERVICE_FILE")"; then
     echo "Service $(basename "$SERVICE_FILE") enabled."
 else
@@ -35,15 +46,17 @@ else
     exit 1
 fi
 
-# Start the service
-if sudo systemctl start "$(basename "$SERVICE_FILE")"; then
-    echo "Service $(basename "$SERVICE_FILE") started."
-else
-    echo "Error: Failed to start service."
-    exit 1
-fi
+# Start the service - We don't start it yet
+# echo "sudo systemctl start $(basename "$SERVICE_FILE")"
+# if sudo systemctl start "$(basename "$SERVICE_FILE")"; then
+    # echo "Service $(basename "$SERVICE_FILE") started."
+# else
+    # echo "Error: Failed to start service."
+    # exit 1
+# fi
 
 # Enable the timer to start on boot
+echo "sudo systemctl enable $(basename "$TIMER_FILE")"
 if sudo systemctl enable "$(basename "$TIMER_FILE")"; then
     echo "Timer $(basename "$TIMER_FILE") enabled."
 else
@@ -52,6 +65,7 @@ else
 fi
 
 # Start the timer service
+echo "sudo systemctl start $(basename "$TIMER_FILE")"
 if sudo systemctl start "$(basename "$TIMER_FILE")"; then
     echo "Timer $(basename "$TIMER_FILE") started."
 else
