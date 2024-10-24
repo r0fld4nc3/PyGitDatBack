@@ -652,20 +652,27 @@ class GitDatBackUI(QWidget):
 
         settings = Settings()
         settings.load_config()
+        saved_repos = settings.get_repos()
 
         logger.info("Iterating saved repos...")
-        for url, info in settings.get_repos().items():
+        for url, info in saved_repos.items():
             logger.info(f"{url}")
             logger.info(f"{info=}")
-            if info.get("do_pull", False):
+            if info.get(settings.KEY_DO_PULL, False):
                 repos.append(Repository(url))
                 logger.info(f"Appended repo {url}")
 
         save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         logger.info(f"Cloning to root directory: {str(save_to)}")
-        
+
         for repo in repos:
             repo.clone_from(save_to)
+            do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
+            _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+            branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
+            
+            settings.save_repo(url, do_pull, _timestamp, branches)
+            settings.save_config()
 
     def on_clone_success(self, repo_name):
         logger.info(f"Cloning completed for: {repo_name}")
