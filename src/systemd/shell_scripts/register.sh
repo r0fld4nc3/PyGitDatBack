@@ -16,8 +16,8 @@ echo "Timer File Dest:    $SERVICE_DEST/$SERVICE_FILE"
 echo ""
 
 # Copy the service file(s)
-echo "Copying "$SERVICE_FILE_IN" to "$SERVICE_DEST"/$SERVICE_FILE"
-echo "Copying "$TIMER_FILE_IN" to "$SERVICE_DEST"/$TIMER_FILE"
+echo "Copying '$SERVICE_FILE_IN' to '$SERVICE_DEST'/$SERVICE_FILE"
+echo "Copying '$TIMER_FILE_IN' to '$SERVICE_DEST'/$TIMER_FILE"
 if sudo cp "$SERVICE_FILE_IN" "$SERVICE_DEST/$SERVICE_FILE" && sudo cp "$TIMER_FILE_IN" "$SERVICE_DEST/$TIMER_FILE"; then
     echo "Files copied successfully."
 else
@@ -54,7 +54,7 @@ fi
 # Enable the timer to start on boot
 echo "sudo systemctl enable $TIMER_FILE"
 if sudo systemctl enable "$TIMER_FILE"; then
-    echo "Timer "$TIMER_FILE" enabled."
+    echo "Timer '$TIMER_FILE' enabled."
 else
     echo "Error: Failed to enable timer."
     exit 1
@@ -63,7 +63,7 @@ fi
 # Start the timer service
 echo "sudo systemctl start $TIMER_FILE"
 if sudo systemctl start "$TIMER_FILE"; then
-    echo "Timer "$TIMER_FILE" started."
+    echo "Timer '$TIMER_FILE' started."
 else
     echo "Error: Failed to start timer."
     exit 1
@@ -73,4 +73,4 @@ fi
 rm "$SERVICE_FILE_IN"
 rm "$TIMER_FILE_IN"
 
-echo "Service "$SERVICE_FILE" successfully registered and started."
+echo "Service '$SERVICE_FILE' successfully registered and started."
