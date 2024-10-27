@@ -43,13 +43,13 @@ else
 fi
 
 # Start the service - We don't start it yet
-echo "sudo systemctl start $(basename "$SERVICE_FILE")"
-if sudo systemctl start "$(basename "$SERVICE_FILE")"; then
-    echo "Service $(basename "$SERVICE_FILE") started."
-else
-    echo "Error: Failed to start service."
-    exit 1
-fi
+# echo "sudo systemctl start $(basename "$SERVICE_FILE")"
+# if sudo systemctl start "$(basename "$SERVICE_FILE")"; then
+#     echo "Service $(basename "$SERVICE_FILE") started."
+# else
+#     echo "Error: Failed to start service."
+#     exit 1
+# fi
 
 # Enable the timer to start on boot
 echo "sudo systemctl enable $TIMER_FILE"
