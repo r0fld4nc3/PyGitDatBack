@@ -776,6 +776,7 @@ class GitDatBackUI(QWidget):
             logger.info(f"Set new schedule: {day}, {time}")
             self.settings.set_scheduled_day(day)
             self.settings.set_scheduled_time(time)
+            self.settings.save_config()
         else:
             logger.info("Cancelled service settings")
 
