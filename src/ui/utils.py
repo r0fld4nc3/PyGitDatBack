@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from log import create_logger
 from conf_globals import G_LOG_LEVEL
 
-logger = create_logger(f"src.{__name__}", G_LOG_LEVEL)
+logger = create_logger(__name__, G_LOG_LEVEL)
 
 def get_screen_info(app: QApplication) -> tuple:
     # Get the primary screen

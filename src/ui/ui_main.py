@@ -5,9 +5,11 @@ from queue import Queue
 from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, QFileDialog
+    QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, 
+    QFileDialog, QDialogButtonBox, QTextEdit, QComboBox
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
+from datetime import time, timedelta
 
 from . import __VERSION__
 from .utils import get_screen_info
@@ -16,8 +18,112 @@ from log import create_logger
 from settings import Settings
 from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, api_status
+import systemd
 
-logger = create_logger("src.ui.ui_main", G_LOG_LEVEL)
+logger = create_logger(__name__, G_LOG_LEVEL)
+
+
+class ServiceConfigWindow(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Service Settings")
+        self.setModal(True) # Blocks interaction with parent window
+        self.resize(QSize(300, 200))
+
+        self.settings = Settings()
+        self.settings.load_config()
+
+        self.selected_day = self.settings.get_scheduled_day()
+        self.selected_time = self.settings.get_scheduled_time()
+
+        main_layout = QVBoxLayout()
+
+        service_date_widgets_layout = QHBoxLayout()
+        
+        # Schedule Widget
+        date_widgets_label = QLabel("Schedule:")
+        
+        # Week Days Combobox
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        self.week_day_dropdown = QComboBox()
+        self.week_day_dropdown.addItems(days)
+        if self.selected_day in days:
+            self.week_day_dropdown.setCurrentText(self.selected_day)
+
+        # Time Possibilities Combobox
+        times = self.__generate_hours_minutes()
+        self.time_dropdown = QComboBox()
+        self.time_dropdown.addItems(times)
+        if self.selected_time in times:
+            self.time_dropdown.setCurrentText(self.selected_time)
+
+        # Accept button
+        ok_button = QPushButton("Accept")
+        ok_button.clicked.connect(self.accept)
+
+        # Add to service date layout
+        service_date_widgets_layout.addWidget(date_widgets_label)
+        service_date_widgets_layout.addWidget(self.week_day_dropdown)
+        service_date_widgets_layout.addWidget(self.time_dropdown)
+        
+        # Add to main layout
+        main_layout.addLayout(service_date_widgets_layout)
+        main_layout.addWidget(ok_button)
+
+        self.setLayout(main_layout)
+
+    def get_selected_values(self):
+        return self.selected_day, self.selected_time
+    
+    def accept(self):
+        self.selected_day = self.week_day_dropdown.currentText()
+        self.selected_time = self.time_dropdown.currentText()
+
+        super().accept()
+    
+    def __generate_hours_minutes(self) -> list:
+        hours_minutes = []
+
+        # Generate times from 00:00 to 23:55 in 5-minute intervals
+        for hour in range(24):
+            for minute in range(0, 60, 5):
+                time_str = f"{hour:02d}:{minute:02d}:00"
+                hours_minutes.append(time_str)
+
+        return hours_minutes
+
+
+class AlertDialog(QDialog):
+    def __init__(self, alert: str, title: str="Alert"):
+        super().__init__()
+
+        self.alert_text = alert
+        self.title = title
+
+        self.setWindowTitle(title)
+
+        self.resize(QSize(400, 200))
+
+        QBtn = (
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+
+        self.button_box = QDialogButtonBox(QBtn)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        
+        self.message_box = QTextEdit(self.alert_text)
+        self.message_box.setEnabled(False)
+        self.message_box.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(self.message_box)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+        self.exec()
 
 
 class TaskQueue(QObject):
@@ -203,6 +309,8 @@ class TableEntry(QWidget):
 
 
 class GitDatBackUI(QWidget):
+    APP_VERSION_STR = 'v' + '.'.join([str(x) for x in __VERSION__])
+
     def __init__(self):
         if not QApplication.instance():
             self.app = QApplication(sys.argv)
@@ -214,11 +322,11 @@ class GitDatBackUI(QWidget):
         self.settings = Settings()
         self.settings.load_config() # Load the config
 
-        self.backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
-        # Set UI constraints
-        self.setWindowTitle("Git Dat Back")
-        self.resize(QSize(810, 400))
+        # Set app constraints
+        self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
+        self.resize(QSize(810, 450))
 
         # Tasks
         self.task_queue = TaskQueue()
@@ -227,11 +335,11 @@ class GitDatBackUI(QWidget):
         self.entries: List[TableEntry] = []
 
         # Main layout
-        self.main_layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
 
         # Widgets
         # Input field layout
-        self.input_layout = QHBoxLayout()
+        input_layout = QHBoxLayout()
         
         # Input field
         self.url_input = QLineEdit()
@@ -263,9 +371,9 @@ class GitDatBackUI(QWidget):
         self.actions_layout.setSpacing(10) # Spacing between buttons
 
         # Remove Button Layout - Where we put button actions
-        self.remove_button_layout = QHBoxLayout()
-        self.remove_button_layout.setContentsMargins(0, 5, 0, 10)
-        self.remove_button_layout.setSpacing(10) # Spacing between buttons
+        remove_button_layout = QHBoxLayout()
+        remove_button_layout.setContentsMargins(0, 5, 0, 10)
+        remove_button_layout.setSpacing(10) # Spacing between buttons
 
         # Removed Selected Button
         self.remove_selected_button = QPushButton("Remove Selected")
@@ -298,7 +406,7 @@ class GitDatBackUI(QWidget):
         # Backup Path Input
         self.backup_path_input = QLineEdit()
         self.backup_path_input.setPlaceholderText("Root folder for repositories...")
-        self.backup_path_input.setText(str(self.backup_path))
+        self.backup_path_input.setText(str(self.repo_backup_path))
         self.backup_path_input.editingFinished.connect(self.set_backup_path)
 
         # Backup Path Pick Button
@@ -310,12 +418,24 @@ class GitDatBackUI(QWidget):
         self.pull_button = QPushButton("Pull Repos")
         self.pull_button.clicked.connect(self.pull_repos)
 
-        self.label_version = QLabel('v' + '.'.join([str(x) for x in __VERSION__]))
-        self.label_version.setAlignment(Qt.AlignCenter)
+        # Register Services Buttons layout
+        register_services_layout = QHBoxLayout()
+
+        # Service Options
+        self.service_options_button = QPushButton("Service Options")
+        self.service_options_button.clicked.connect(self.show_service_options_dialog)
+
+        # Register Service Button
+        self.register_service_button = QPushButton("Register Service")
+        self.register_service_button.clicked.connect(self.register_background_service)
+
+        # Unregister Service Button
+        self.unregister_service_button = QPushButton("Unregister Service")
+        self.unregister_service_button.clicked.connect(self.unregister_background_service)
 
         # Add widgets to input layout
-        self.input_layout.addWidget(self.url_input)
-        self.input_layout.addWidget(self.submit_button)
+        input_layout.addWidget(self.url_input)
+        input_layout.addWidget(self.submit_button)
 
         # Add widget to actions_layout
         self.actions_layout.addWidget(self.set_selection_selected_button)
@@ -325,24 +445,30 @@ class GitDatBackUI(QWidget):
         self.actions_layout.addStretch()
         
         # Add widget to remove_button layout
-        self.remove_button_layout.addWidget(self.remove_selected_button)
-        self.remove_button_layout.addStretch()
+        remove_button_layout.addWidget(self.remove_selected_button)
+        remove_button_layout.addStretch()
 
         # Add widgets to backup path layout
         self.backup_path_layout.addWidget(self.backup_path_input)
         self.backup_path_layout.addWidget(self.backup_back_button)
+
+        # Add widgets to register services layout
+        register_services_layout.addWidget(self.service_options_button)
+        register_services_layout.addWidget(self.register_service_button)
+        register_services_layout.addWidget(self.unregister_service_button)
+        register_services_layout.addStretch()
         
         # Add widgets to main layout
-        self.main_layout.addLayout(self.input_layout)
-        self.main_layout.addWidget(self.info_label)
-        self.main_layout.addLayout(self.actions_layout)
-        self.main_layout.addWidget(self.entry_table)
-        self.main_layout.addLayout(self.remove_button_layout)
-        self.main_layout.addLayout(self.backup_path_layout)
-        self.main_layout.addWidget(self.pull_button)
-        self.main_layout.addWidget(self.label_version)
+        main_layout.addLayout(input_layout)
+        main_layout.addWidget(self.info_label)
+        main_layout.addLayout(self.actions_layout)
+        main_layout.addWidget(self.entry_table)
+        main_layout.addLayout(remove_button_layout)
+        main_layout.addLayout(self.backup_path_layout)
+        main_layout.addLayout(register_services_layout)
+        main_layout.addWidget(self.pull_button)
 
-        self.setLayout(self.main_layout)
+        self.setLayout(main_layout)
 
         self.load_saved_repos()
 
@@ -489,7 +615,7 @@ class GitDatBackUI(QWidget):
                     branches = [b.strip() for b in input_dialog.textValue().split(',')]
                     entry_item.set_branches(branches)
                     logger.info(f"Updated branches of {entry_url}: {branches}")
-                    self.tell(f"Updated branches of {entry_url}: {branches}")
+                    self.tell(f"Updated branches of {entry_url.split('/')[-1]}: {branches}")
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
@@ -546,7 +672,7 @@ class GitDatBackUI(QWidget):
         self.tell("Deselected all.")
 
     def pick_backup_path(self):
-        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.backup_path))
+        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.repo_backup_path))
 
         if choice:
             self.set_backup_path()
@@ -559,7 +685,7 @@ class GitDatBackUI(QWidget):
         if choice:
             folder_path = Path(self.backup_path_input.text()).resolve()
             self.backup_path_input.setText(str(folder_path))
-            self.backup_path = folder_path
+            self.repo_backup_path = folder_path
             logger.info(f"Backup path: {folder_path}")
 
     def tell(self, what: str):
@@ -573,15 +699,19 @@ class GitDatBackUI(QWidget):
             is_checked = entry.get_pull()
             url = entry.get_url()
             
+            logger.debug(f"{url=}")
+            logger.debug(f"    {is_checked=}")
+            
             if is_checked:
                 repos.append((Repository(url), entry))
+                entry.set_timestamp("Fetching...")
 
         if not repos:
             self.tell("Nothing is checked.")
             return
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.backup_path, entry)
+            clone_task = CloneRepoTask(repo, self.repo_backup_path, entry)
 
             # Connect the signals
             clone_task.signals.finished.connect(self.on_clone_success)
@@ -589,16 +719,89 @@ class GitDatBackUI(QWidget):
 
             self.task_queue.add_task(clone_task)
 
+    @staticmethod
+    def pull_repos_no_ui():
+        logger.warning("Pull Repos lacks full implementation.")
+        repos = []
+
+        settings = Settings()
+        settings.load_config()
+        saved_repos = settings.get_repos()
+
+        logger.info("Iterating saved repos...")
+        for url, info in saved_repos.items():
+            logger.info(f"{url}")
+            logger.info(f"{info=}")
+            if info.get(settings.KEY_DO_PULL, False):
+                repos.append(Repository(url))
+                logger.info(f"Appended repo {url}")
+
+        save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        logger.info(f"Cloning to root directory: {str(save_to)}")
+
+        for repo in repos:
+            repo.clone_from(save_to)
+            do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
+            _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+            branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
+            
+            settings.save_repo(url, do_pull, _timestamp, branches)
+            settings.save_config()
+
     def on_clone_success(self, repo_name):
         logger.info(f"Cloning completed for: {repo_name}")
 
         for entry in self.entries:  
             if entry.url_label.text() == repo_name:
                 entry.set_timestamp_now()
+
+        self.tell(f"Cloning completed for: {repo_name}")
                 
     def on_clone_error(self, repo_name, error_msg):
         logger.error(f"Error cloning repository {repo_name}: {error_msg}")
         self.tell(f"Error cloning {repo_name}: {error_msg}")
+
+        for entry in self.entries:  
+            if entry.url_label.text() == repo_name:
+                entry.set_timestamp("Error")
+
+    def show_service_options_dialog(self):
+        service_dialog = ServiceConfigWindow(self)
+        result = service_dialog.exec()
+
+        # Handle results
+        if result == QDialog.DialogCode.Accepted:
+            logger.info("Accepted new service settings")
+            day, time = service_dialog.get_selected_values()
+            logger.info(f"Set new schedule: {day}, {time}")
+            self.settings.set_scheduled_day(day)
+            self.settings.set_scheduled_time(time)
+        else:
+            logger.info("Cancelled service settings")
+
+    def register_background_service(self):
+        day = self.settings.get_scheduled_day()
+        time = self.settings.get_scheduled_time()
+
+        if day or time:
+            logger.info(f"Want to register service with custom schedule: {day} - {time}")
+            success, status = systemd.register_service(day=day, time=time)
+        else:
+            logger.info(f"Want to register service with default schedule")
+            success, status = systemd.register_service(day=day, time=time)
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to register.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+
+    def unregister_background_service(self):            
+        success, status = systemd.unregister_service()
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def show(self):
         super().show()
@@ -609,8 +812,8 @@ class GitDatBackUI(QWidget):
         logger.info("Application is closing. Shutting down procedure")
         self.task_queue.stop()
         
-        # Settings save
-        self.settings.set_save_root_dir(self.backup_path)
+        # Save root directory for repo backups
+        self.settings.set_save_root_dir(self.repo_backup_path)
         
         # Save state of each widget entry in the table
         for entry in self.iter_entries():

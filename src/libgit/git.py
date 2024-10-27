@@ -22,13 +22,13 @@ API_EXT_GITHUB_BRANCHES = "branches"
 
 
 class Repository(git.Repo):
-    def __init__(self, url, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, url):
+        # super().__init__(*args, **kwargs)
         self.url: str  = url
         self.name: str  = ""
         self.owner: str = ""
         self.cloned_to: Path = ""
-        self.repo: git.Repo = None
+        self.repo: git.Repo = None # Will eventually reference self
         self.head_name = ""
         self.repo_branches: list[git.RemoteReference] = list()
         self.active_branches: list[git.RemoteReference] = list()
@@ -111,10 +111,13 @@ class Repository(git.Repo):
 
             if successful_clone:
                 self.cloned_to = clone_dest
+                # Now initialise the base class
+                super().__init__(str(clone_dest))
+                self.repo = self
 
         # Don't collect branch names if we're cloning a specific branch already
-        if not kwargs.get("branch", None):
-            self.collect_branches()
+        # if not kwargs.get("branch", None):
+            # self.collect_branches()
 
         return self
     

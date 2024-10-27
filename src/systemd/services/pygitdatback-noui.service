@@ -1,0 +1,16 @@
+[Unit]
+Description=PyGitDatBack No-UI Background Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={{PYTHON_PATH}} {{PATH_TO_ENTRY_POINT}}
+WorkingDirectory={{PATH_TO_PROJECT}}
+User=1000
+Group=1000
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

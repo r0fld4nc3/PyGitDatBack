@@ -1,0 +1,10 @@
+[Unit]
+Description=Run PyGitDatBack No-UI Service Weekly
+
+[Timer]
+OnCalendar={{DAY_VAR}} *-*-* {{TIME_VAR}}
+Persistent=true
+RandomizeDelaySec=60
+
+[Install]
+WantedBy=timers.target
