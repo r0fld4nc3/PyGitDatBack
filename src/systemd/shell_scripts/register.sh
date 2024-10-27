@@ -16,8 +16,8 @@ echo "Timer File Dest:    $SERVICE_DEST/$SERVICE_FILE"
 echo ""
 
 # Copy the service file(s)
-echo "Copying '$SERVICE_FILE_IN' to '$SERVICE_DEST'/$SERVICE_FILE"
-echo "Copying '$TIMER_FILE_IN' to '$SERVICE_DEST'/$TIMER_FILE"
+echo "Copying $SERVICE_FILE_IN to $SERVICE_DEST/$SERVICE_FILE"
+echo "Copying $TIMER_FILE_IN to $SERVICE_DEST/$TIMER_FILE"
 if sudo cp "$SERVICE_FILE_IN" "$SERVICE_DEST/$SERVICE_FILE" && sudo cp "$TIMER_FILE_IN" "$SERVICE_DEST/$TIMER_FILE"; then
     echo "Files copied successfully."
 else
