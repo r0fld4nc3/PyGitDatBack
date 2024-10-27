@@ -237,6 +237,8 @@ class TableEntry(QWidget):
 
 
 class GitDatBackUI(QWidget):
+    APP_VERSION_STR = 'v' + '.'.join([str(x) for x in __VERSION__])
+
     def __init__(self):
         if not QApplication.instance():
             self.app = QApplication(sys.argv)
@@ -248,10 +250,10 @@ class GitDatBackUI(QWidget):
         self.settings = Settings()
         self.settings.load_config() # Load the config
 
-        self.backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
-        # Set UI constraints
-        self.setWindowTitle("Git Dat Back")
+        # Set app constraints
+        self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
         self.resize(QSize(810, 450))
 
         # Tasks
@@ -332,7 +334,7 @@ class GitDatBackUI(QWidget):
         # Backup Path Input
         self.backup_path_input = QLineEdit()
         self.backup_path_input.setPlaceholderText("Root folder for repositories...")
-        self.backup_path_input.setText(str(self.backup_path))
+        self.backup_path_input.setText(str(self.repo_backup_path))
         self.backup_path_input.editingFinished.connect(self.set_backup_path)
 
         # Backup Path Pick Button
@@ -354,10 +356,6 @@ class GitDatBackUI(QWidget):
         # Unregister Service Button
         self.unregister_service_button = QPushButton("Unregister Service")
         self.unregister_service_button.clicked.connect(self.unregister_background_service)
-
-        # Version Label
-        self.label_version = QLabel('v' + '.'.join([str(x) for x in __VERSION__]))
-        self.label_version.setAlignment(Qt.AlignCenter)
 
         # Add widgets to input layout
         self.input_layout.addWidget(self.url_input)
@@ -392,7 +390,6 @@ class GitDatBackUI(QWidget):
         self.main_layout.addLayout(self.backup_path_layout)
         self.main_layout.addWidget(self.pull_button)
         self.main_layout.addLayout(self.register_services_layout)
-        self.main_layout.addWidget(self.label_version)
 
         self.setLayout(self.main_layout)
 
@@ -598,7 +595,7 @@ class GitDatBackUI(QWidget):
         self.tell("Deselected all.")
 
     def pick_backup_path(self):
-        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.backup_path))
+        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.repo_backup_path))
 
         if choice:
             self.set_backup_path()
@@ -611,7 +608,7 @@ class GitDatBackUI(QWidget):
         if choice:
             folder_path = Path(self.backup_path_input.text()).resolve()
             self.backup_path_input.setText(str(folder_path))
-            self.backup_path = folder_path
+            self.repo_backup_path = folder_path
             logger.info(f"Backup path: {folder_path}")
 
     def tell(self, what: str):
@@ -637,7 +634,7 @@ class GitDatBackUI(QWidget):
             return
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.backup_path, entry)
+            clone_task = CloneRepoTask(repo, self.repo_backup_path, entry)
 
             # Connect the signals
             clone_task.signals.finished.connect(self.on_clone_success)
@@ -700,8 +697,8 @@ class GitDatBackUI(QWidget):
         logger.info("Application is closing. Shutting down procedure")
         self.task_queue.stop()
         
-        # Settings save
-        self.settings.set_save_root_dir(self.backup_path)
+        # Save root directory for repo backups
+        self.settings.set_save_root_dir(self.repo_backup_path)
         
         # Save state of each widget entry in the table
         for entry in self.iter_entries():
