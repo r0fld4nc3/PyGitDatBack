@@ -6,9 +6,10 @@ from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, 
-    QFileDialog, QDialogButtonBox, QTextEdit
+    QFileDialog, QDialogButtonBox, QTextEdit, QComboBox
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
+from datetime import time, timedelta
 
 from . import __VERSION__
 from .utils import get_screen_info
@@ -20,6 +21,77 @@ from libgit import validate_github_url, get_branches_and_commits, api_status
 import systemd
 
 logger = create_logger(__name__, G_LOG_LEVEL)
+
+
+class ServiceConfigWindow(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Service Settings")
+        self.setModal(True) # Blocks interaction with parent window
+        self.resize(QSize(300, 200))
+
+        self.settings = Settings()
+        self.settings.load_config()
+
+        self.selected_day = self.settings.get_scheduled_day()
+        self.selected_time = self.settings.get_scheduled_time()
+
+        main_layout = QVBoxLayout()
+
+        service_date_widgets_layout = QHBoxLayout()
+        
+        # Schedule Widget
+        date_widgets_label = QLabel("Schedule:")
+        
+        # Week Days Combobox
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        self.week_day_dropdown = QComboBox()
+        self.week_day_dropdown.addItems(days)
+        if self.selected_day in days:
+            self.week_day_dropdown.setCurrentText(self.selected_day)
+
+        # Time Possibilities Combobox
+        times = self.__generate_hours_minutes()
+        self.time_dropdown = QComboBox()
+        self.time_dropdown.addItems(times)
+        if self.selected_time in times:
+            self.time_dropdown.setCurrentText(self.selected_time)
+
+        # Accept button
+        ok_button = QPushButton("Accept")
+        ok_button.clicked.connect(self.accept)
+
+        # Add to service date layout
+        service_date_widgets_layout.addWidget(date_widgets_label)
+        service_date_widgets_layout.addWidget(self.week_day_dropdown)
+        service_date_widgets_layout.addWidget(self.time_dropdown)
+        
+        # Add to main layout
+        main_layout.addLayout(service_date_widgets_layout)
+        main_layout.addWidget(ok_button)
+
+        self.setLayout(main_layout)
+
+    def get_selected_values(self):
+        return self.selected_day, self.selected_time
+    
+    def accept(self):
+        self.selected_day = self.week_day_dropdown.currentText()
+        self.selected_time = self.time_dropdown.currentText()
+
+        super().accept()
+    
+    def __generate_hours_minutes(self) -> list:
+        hours_minutes = []
+
+        # Generate times from 00:00 to 23:55 in 5-minute intervals
+        for hour in range(24):
+            for minute in range(0, 60, 5):
+                time_str = f"{hour:02d}:{minute:02d}:00"
+                hours_minutes.append(time_str)
+
+        return hours_minutes
 
 
 class AlertDialog(QDialog):
@@ -263,11 +335,11 @@ class GitDatBackUI(QWidget):
         self.entries: List[TableEntry] = []
 
         # Main layout
-        self.main_layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
 
         # Widgets
         # Input field layout
-        self.input_layout = QHBoxLayout()
+        input_layout = QHBoxLayout()
         
         # Input field
         self.url_input = QLineEdit()
@@ -299,9 +371,9 @@ class GitDatBackUI(QWidget):
         self.actions_layout.setSpacing(10) # Spacing between buttons
 
         # Remove Button Layout - Where we put button actions
-        self.remove_button_layout = QHBoxLayout()
-        self.remove_button_layout.setContentsMargins(0, 5, 0, 10)
-        self.remove_button_layout.setSpacing(10) # Spacing between buttons
+        remove_button_layout = QHBoxLayout()
+        remove_button_layout.setContentsMargins(0, 5, 0, 10)
+        remove_button_layout.setSpacing(10) # Spacing between buttons
 
         # Removed Selected Button
         self.remove_selected_button = QPushButton("Remove Selected")
@@ -347,7 +419,11 @@ class GitDatBackUI(QWidget):
         self.pull_button.clicked.connect(self.pull_repos)
 
         # Register Services Buttons layout
-        self.register_services_layout = QHBoxLayout()
+        register_services_layout = QHBoxLayout()
+
+        # Service Options
+        self.service_options_button = QPushButton("Service Options")
+        self.service_options_button.clicked.connect(self.show_service_options_dialog)
 
         # Register Service Button
         self.register_service_button = QPushButton("Register Service")
@@ -358,8 +434,8 @@ class GitDatBackUI(QWidget):
         self.unregister_service_button.clicked.connect(self.unregister_background_service)
 
         # Add widgets to input layout
-        self.input_layout.addWidget(self.url_input)
-        self.input_layout.addWidget(self.submit_button)
+        input_layout.addWidget(self.url_input)
+        input_layout.addWidget(self.submit_button)
 
         # Add widget to actions_layout
         self.actions_layout.addWidget(self.set_selection_selected_button)
@@ -369,29 +445,30 @@ class GitDatBackUI(QWidget):
         self.actions_layout.addStretch()
         
         # Add widget to remove_button layout
-        self.remove_button_layout.addWidget(self.remove_selected_button)
-        self.remove_button_layout.addStretch()
+        remove_button_layout.addWidget(self.remove_selected_button)
+        remove_button_layout.addStretch()
 
         # Add widgets to backup path layout
         self.backup_path_layout.addWidget(self.backup_path_input)
         self.backup_path_layout.addWidget(self.backup_back_button)
 
         # Add widgets to register services layout
-        self.register_services_layout.addWidget(self.register_service_button)
-        self.register_services_layout.addWidget(self.unregister_service_button)
-        self.register_services_layout.addStretch()
+        register_services_layout.addWidget(self.service_options_button)
+        register_services_layout.addWidget(self.register_service_button)
+        register_services_layout.addWidget(self.unregister_service_button)
+        register_services_layout.addStretch()
         
         # Add widgets to main layout
-        self.main_layout.addLayout(self.input_layout)
-        self.main_layout.addWidget(self.info_label)
-        self.main_layout.addLayout(self.actions_layout)
-        self.main_layout.addWidget(self.entry_table)
-        self.main_layout.addLayout(self.remove_button_layout)
-        self.main_layout.addLayout(self.backup_path_layout)
-        self.main_layout.addWidget(self.pull_button)
-        self.main_layout.addLayout(self.register_services_layout)
+        main_layout.addLayout(input_layout)
+        main_layout.addWidget(self.info_label)
+        main_layout.addLayout(self.actions_layout)
+        main_layout.addWidget(self.entry_table)
+        main_layout.addLayout(remove_button_layout)
+        main_layout.addLayout(self.backup_path_layout)
+        main_layout.addLayout(register_services_layout)
+        main_layout.addWidget(self.pull_button)
 
-        self.setLayout(self.main_layout)
+        self.setLayout(main_layout)
 
         self.load_saved_repos()
 
@@ -688,6 +765,44 @@ class GitDatBackUI(QWidget):
             if entry.url_label.text() == repo_name:
                 entry.set_timestamp("Error")
 
+    def show_service_options_dialog(self):
+        service_dialog = ServiceConfigWindow(self)
+        result = service_dialog.exec()
+
+        # Handle results
+        if result == QDialog.DialogCode.Accepted:
+            logger.info("Accepted new service settings")
+            day, time = service_dialog.get_selected_values()
+            logger.info(f"Set new schedule: {day}, {time}")
+            self.settings.set_scheduled_day(day)
+            self.settings.set_scheduled_time(time)
+        else:
+            logger.info("Cancelled service settings")
+
+    def register_background_service(self):
+        day = self.settings.get_scheduled_day()
+        time = self.settings.get_scheduled_time()
+
+        if day or time:
+            logger.info(f"Want to register service with custom schedule: {day} - {time}")
+            success, status = systemd.register_service(day=day, time=time)
+        else:
+            logger.info(f"Want to register service with default schedule")
+            success, status = systemd.register_service(day=day, time=time)
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to register.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+
+    def unregister_background_service(self):            
+        success, status = systemd.unregister_service()
+        if success:
+            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
+            clipboard = self.app.clipboard()
+            clipboard.setText(status)
+            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+
     def show(self):
         super().show()
         self._adjust_app_size()
@@ -714,22 +829,6 @@ class GitDatBackUI(QWidget):
         
         logger.info("Shutdown")
         event.accept()
-
-    def register_background_service(self):
-        success, status = systemd.register_service()
-        if success:
-            self.tell("Command copied to clipboard. Run in Terminal to register.")
-            clipboard = self.app.clipboard()
-            clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
-
-    def unregister_background_service(self):            
-        success, status = systemd.unregister_service()
-        if success:
-            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
-            clipboard = self.app.clipboard()
-            clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def _adjust_app_size(self):
         screen_info = get_screen_info(self.app)

@@ -28,6 +28,8 @@ logger = create_logger("Settings", G_LOG_LEVEL)
 class Settings:
     KEY_SAVE_TO = "save_to"
     KEY_SERVICE_SET = "background_service_set"
+    KEY_SCHEDULED_DAY = "schedule_svc_day"
+    KEY_SCHEDULED_TIME = "schedule_svc_time"
     KEY_REPOS = "repos"
     KEY_DO_PULL = "do_pull"
     KEY_LAST_PULLED = "last_pulled"
@@ -36,6 +38,8 @@ class Settings:
     def __init__(self):
         self.settings = {
             self.KEY_SAVE_TO: "",
+            self.KEY_SCHEDULED_DAY: "",
+            self.KEY_SCHEDULED_TIME: "",
             self.KEY_SERVICE_SET: False,
             self.KEY_REPOS: {}
         }
@@ -115,6 +119,20 @@ class Settings:
     def set_background_service_status(self, status: bool):
         self.settings[self.KEY_SERVICE_SET] = status
         logger.info(f"Set background service status to: {status}")
+
+    def get_scheduled_day(self) -> str:
+        return self.settings.get(self.KEY_SCHEDULED_DAY, "")
+    
+    def set_scheduled_day(self, day: str) -> str:
+        logger.info(f"Set Scheduled Day to {day}")
+        self.settings[self.KEY_SCHEDULED_DAY] = day
+    
+    def get_scheduled_time(self) -> str:
+        return self.settings.get(self.KEY_SCHEDULED_TIME, "")
+    
+    def set_scheduled_time(self, time: str) -> str:
+        logger.info(f"Set Scheduled Time to {time}")
+        self.settings[self.KEY_SCHEDULED_TIME] = time
 
     def load_config(self) -> dict:
         if self.config_dir == '' or not Path(self.config_dir).exists()\

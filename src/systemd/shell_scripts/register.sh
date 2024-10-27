@@ -69,7 +69,8 @@ else
     exit 1
 fi
 
-# Delete the temp file
+# Delete the temp files
 rm "$SERVICE_FILE_IN"
+rm "$TIMER_FILE_IN"
 
 echo "Service "$SERVICE_FILE" successfully registered and started."
