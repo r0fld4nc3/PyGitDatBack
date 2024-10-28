@@ -321,8 +321,6 @@ class GitDatBackUI(QWidget):
         self.settings = Settings()
         self.settings.load_config() # Load the config
 
-        self.no_ui = False
-
         self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
         # Set app constraints
@@ -725,36 +723,36 @@ class GitDatBackUI(QWidget):
 
         self.set_buttons_state_while_task(True)
 
-    def pull_repos_no_ui(self):
+    @staticmethod
+    def pull_repos_no_ui():
         logger.warning("Pull Repos lacks full implementation.")
         repos: list[Repository] = []
 
-        self.no_ui = True
-
-        saved_repos = self.settings.get_repos()
+        settings = Settings()
+        settings.load_config()
+        saved_repos = settings.get_repos()
 
         logger.info("Iterating saved repos...")
         for url, info in saved_repos.items():
             logger.info(f"{url}")
             logger.info(f"{info=}")
-            if info.get(self.settings.KEY_DO_PULL, False):
+            if info.get(settings.KEY_DO_PULL, False):
                 repos.append(Repository(url))
                 logger.info(f"Collected repo {url}")
 
-        save_to = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         logger.info(f"Cloning to root directory: {str(save_to)}")
 
         for repo in repos:
             repo.clone_from(save_to)
             url = repo.url
-            do_pull = saved_repos[url].get(self.settings.KEY_DO_PULL)
+            do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
             timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-            branches = saved_repos[url].get(self.settings.KEY_BRANCHES, [])
+            branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
             
-            self.settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+            settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
         
         logger.info("Pull Repos No UI finished")
-        self.close()
 
     def on_clone_success(self, repo_name):
         logger.info(f"Cloning completed for: {repo_name}")
@@ -836,12 +834,6 @@ class GitDatBackUI(QWidget):
     def closeEvent(self, event):
         logger.info("Application is closing. Shutting down procedure")
         self.task_queue.stop()
-
-        if self.no_ui:
-            logger.info("Shutdown no UI")
-            self.settings.save_config()
-            event.accept()
-            return
         
         # Save root directory for repo backups
         self.settings.set_save_root_dir(self.repo_backup_path)
