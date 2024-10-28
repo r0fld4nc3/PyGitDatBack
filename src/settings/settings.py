@@ -71,10 +71,15 @@ class Settings:
     def save_repo(self, repo_url, do_pull, timestamp:str = "", branches: list = []):
         repo_url = str(repo_url).strip()
 
+        logger.info(f"Save repo {repo_url}\n{do_pull=}, {timestamp=}, {branches=}")
+
         if self.KEY_REPOS not in self.settings:
+            logger.info(f"Creating key {self.KEY_REPOS}")
             self.settings[self.KEY_REPOS] = {}
 
         if repo_url not in self.settings[self.KEY_REPOS]:
+            logger.info(f"{repo_url} not in repo keys")
+            logger.debug(f"{self.settings[self.KEY_REPOS]=}")
             self.settings[self.KEY_REPOS][repo_url] = {
                 self.KEY_DO_PULL: do_pull,
                 self.KEY_LAST_PULLED: timestamp,

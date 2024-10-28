@@ -11,9 +11,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
 from datetime import time, timedelta
 
-from . import __VERSION__
 from .utils import get_screen_info
-from conf_globals import G_LOG_LEVEL
+from conf_globals import G_LOG_LEVEL, VERSION
 from log import create_logger
 from settings import Settings
 from libgit import Repository
@@ -309,7 +308,7 @@ class TableEntry(QWidget):
 
 
 class GitDatBackUI(QWidget):
-    APP_VERSION_STR = 'v' + '.'.join([str(x) for x in __VERSION__])
+    APP_VERSION_STR = 'v' + '.'.join([str(x) for x in VERSION])
 
     def __init__(self):
         if not QApplication.instance():
@@ -321,6 +320,8 @@ class GitDatBackUI(QWidget):
 
         self.settings = Settings()
         self.settings.load_config() # Load the config
+
+        self.no_ui = False
 
         self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
@@ -410,9 +411,9 @@ class GitDatBackUI(QWidget):
         self.backup_path_input.editingFinished.connect(self.set_backup_path)
 
         # Backup Path Pick Button
-        self.backup_back_button = QPushButton("Pick")
-        self.backup_back_button.clicked.connect(self.pick_backup_path)
-        self.backup_back_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.pick_backup_path_button = QPushButton("Pick")
+        self.pick_backup_path_button.clicked.connect(self.pick_backup_path)
+        self.pick_backup_path_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Pull Repos Button
         self.pull_button = QPushButton("Pull Repos")
@@ -450,7 +451,7 @@ class GitDatBackUI(QWidget):
 
         # Add widgets to backup path layout
         self.backup_path_layout.addWidget(self.backup_path_input)
-        self.backup_path_layout.addWidget(self.backup_back_button)
+        self.backup_path_layout.addWidget(self.pick_backup_path_button)
 
         # Add widgets to register services layout
         register_services_layout.addWidget(self.service_options_button)
@@ -693,6 +694,9 @@ class GitDatBackUI(QWidget):
 
     def pull_repos(self):
         logger.warning("Pull Repos lacks full implementation.")
+
+        self.set_buttons_state_while_task(False)
+
         repos = []
 
         for entry in self.iter_entries():
@@ -719,34 +723,38 @@ class GitDatBackUI(QWidget):
 
             self.task_queue.add_task(clone_task)
 
-    @staticmethod
-    def pull_repos_no_ui():
-        logger.warning("Pull Repos lacks full implementation.")
-        repos = []
+        self.set_buttons_state_while_task(True)
 
-        settings = Settings()
-        settings.load_config()
-        saved_repos = settings.get_repos()
+    def pull_repos_no_ui(self):
+        logger.warning("Pull Repos lacks full implementation.")
+        repos: list[Repository] = []
+
+        self.no_ui = True
+
+        saved_repos = self.settings.get_repos()
 
         logger.info("Iterating saved repos...")
         for url, info in saved_repos.items():
             logger.info(f"{url}")
             logger.info(f"{info=}")
-            if info.get(settings.KEY_DO_PULL, False):
+            if info.get(self.settings.KEY_DO_PULL, False):
                 repos.append(Repository(url))
-                logger.info(f"Appended repo {url}")
+                logger.info(f"Collected repo {url}")
 
-        save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        save_to = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         logger.info(f"Cloning to root directory: {str(save_to)}")
 
         for repo in repos:
             repo.clone_from(save_to)
-            do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
-            _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-            branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
+            url = repo.url
+            do_pull = saved_repos[url].get(self.settings.KEY_DO_PULL)
+            timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+            branches = saved_repos[url].get(self.settings.KEY_BRANCHES, [])
             
-            settings.save_repo(url, do_pull, _timestamp, branches)
-            settings.save_config()
+            self.settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+        
+        logger.info("Pull Repos No UI finished")
+        self.close()
 
     def on_clone_success(self, repo_name):
         logger.info(f"Cloning completed for: {repo_name}")
@@ -756,6 +764,22 @@ class GitDatBackUI(QWidget):
                 entry.set_timestamp_now()
 
         self.tell(f"Cloning completed for: {repo_name}")
+
+    def set_button_state(button_widget: QPushButton, state: bool):
+        button_widget.setEnabled(state)
+
+    def set_buttons_state_while_task(self, state: bool):
+        self.set_button_state(self.submit_button, state)
+        self.set_button_state(self.set_selection_selected_button, state)
+        self.set_button_state(self.set_selection_deselected_button, state)
+        self.set_button_state(self.set_all_selected_button, state)
+        self.set_button_state(self.set_all_deselected_button, state)
+        self.set_button_state(self.remove_selected_button, state)
+        self.set_button_state(self.pick_backup_path_button, state)
+        self.set_button_state(self.service_options_button, state)
+        self.set_button_state(self.register_service_button, state)
+        self.set_button_state(self.unregister_service_button, state)
+        self.set_button_state(self.pull_button, state)
                 
     def on_clone_error(self, repo_name, error_msg):
         logger.error(f"Error cloning repository {repo_name}: {error_msg}")
@@ -812,6 +836,12 @@ class GitDatBackUI(QWidget):
     def closeEvent(self, event):
         logger.info("Application is closing. Shutting down procedure")
         self.task_queue.stop()
+
+        if self.no_ui:
+            logger.info("Shutdown no UI")
+            self.settings.save_config()
+            event.accept()
+            return
         
         # Save root directory for repo backups
         self.settings.set_save_root_dir(self.repo_backup_path)

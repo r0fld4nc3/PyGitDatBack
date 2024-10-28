@@ -32,7 +32,7 @@ def create_logger(logger_name: str, level: int) -> logging.Logger:
     handler_stream = logging.StreamHandler()
     handler_file = logging.FileHandler(LOG_FILE)
 
-    formatter = logging.Formatter(f"[%(asctime)s] [%(name)s] [%(funcName)s] [%(levelname)s] %(message)s", 
+    formatter = logging.Formatter(f"[%(asctime)s] [%(levelname)s] [%(name)s] [%(funcName)s] %(message)s", 
                                   datefmt="%d-%m-%Y %H:%M:%S")
     handler_stream.setFormatter(formatter)
     handler_file.setFormatter(formatter)

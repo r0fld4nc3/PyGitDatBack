@@ -70,7 +70,7 @@ class Repository(git.Repo):
             os.makedirs(dest, exist_ok=True)
         
         if f"{self.name.lower()}" not in dest.name.lower():
-            logger.debug(f"[{self.name}] {self.name.lower()} not in {dest}, therefore append {self.name} to {dest}")
+            logger.debug(f"[{self.name}] {self.name.lower()} not in {dest}: {self.name} to {dest}")
             dest = dest / self.name
 
         # The final destination for the specific branch inside the dest folder
@@ -255,12 +255,18 @@ class Repository(git.Repo):
 
     def set_backup_dir(self, dir_path: Path) -> Path:
         backup_dir: Path = dir_path.parent / f"backup-{dir_path.name}"
+        logger.info(f"Backup dir: {backup_dir}")
 
         if backup_dir.exists():
             logger.info(f"[{self.name}] Deleting backup-dir: {backup_dir}")
             self.__remove_dir(backup_dir)
 
-        shutil.copytree(dir_path, backup_dir, dirs_exist_ok=True)
+        os.rename(dir_path, backup_dir)
+
+        # try:
+        #     shutil.copytree(dir_path, backup_dir, dirs_exist_ok=True)
+        # except Exception as e:
+        #     logger.error(f"Error setting backup directory: {e}")
         
         return backup_dir
 
@@ -269,10 +275,15 @@ class Repository(git.Repo):
         # Try to remove the directory
         logger.debug(f"[{self.name}] shutil.rmtree({to_remove}, onerror={_rmtree_on_error})")
         try:
-            shutil.rmtree(to_remove, onerror=_rmtree_on_error)
+            shutil.rmtree(to_remove, onerror=_rmtree_on_error) # 3.12 deprecates onerror
         except Exception as e:
             logger.error(f"[{self.name}] {e}", exc_info=1)
-            return False
+            logger.info(f"Python 3.12 deprecated `onerror` and uses `onexc`. Attempting with that...")
+            try:
+                shutil.rmtree(to_remove, onexc=_rmtree_on_error) # 3.12 replaced onerror with onexc
+            except Exception as e:
+                logger.error(f"[{self.name}] {e}", exc_info=1)
+                return False
 
         return True
 
@@ -299,7 +310,7 @@ def _rmtree_on_error(func, path, exc_info):
 
         If the error is for another reason it re-raises the error.
 
-        Usage : ``shutil.rmtree(path, onerror=onerror)``
+        Usage : ``shutil.rmtree(path, onexc=onerror)``
         """
     # Is the error an access error?
     if not os.access(path, os.W_OK):
