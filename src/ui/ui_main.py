@@ -35,6 +35,12 @@ class ServiceConfigWindow(QDialog):
 
         self.selected_day = self.settings.get_scheduled_day()
         self.selected_time = self.settings.get_scheduled_time()
+        self.selected_hour = self.selected_time.split(':')[0]
+        self.selected_min = self.selected_time.split(':')[1]
+
+        logger.debug(f"{self.selected_time=}")
+        logger.debug(f"{self.selected_hour=}")
+        logger.debug(f"{self.selected_min=}")
 
         main_layout = QVBoxLayout()
 
@@ -52,19 +58,34 @@ class ServiceConfigWindow(QDialog):
 
         # Time Possibilities Combobox
         times = self.__generate_hours_minutes()
-        self.time_dropdown = QComboBox()
-        self.time_dropdown.addItems(times)
-        if self.selected_time in times:
-            self.time_dropdown.setCurrentText(self.selected_time)
+        self.hours_dropdown = QComboBox()
+        self.hours_dropdown.setContentsMargins(0, 0, 0, 0)
+        self.minutes_dropdown = QComboBox()
+        self.hours_dropdown.addItems(times[0])
+        self.minutes_dropdown.addItems(times[1])
+        if self.selected_hour in times[0]:
+            self.hours_dropdown.setCurrentText(self.selected_hour)
+        if self.selected_min in times[1]:
+            self.minutes_dropdown.setCurrentText(self.selected_min)
+
+        hour_sep = QLabel("h:")
+        min_sep = QLabel("min")
+        hour_sep.setContentsMargins(0, 0, 0, 0)
+        min_sep.setContentsMargins(0, 0, 0, 0)
 
         # Accept button
         ok_button = QPushButton("Accept")
         ok_button.clicked.connect(self.accept)
 
         # Add to service date layout
+        service_date_widgets_layout.addStretch()
         service_date_widgets_layout.addWidget(date_widgets_label)
         service_date_widgets_layout.addWidget(self.week_day_dropdown)
-        service_date_widgets_layout.addWidget(self.time_dropdown)
+        service_date_widgets_layout.addWidget(self.hours_dropdown)
+        service_date_widgets_layout.addWidget(hour_sep)
+        service_date_widgets_layout.addWidget(self.minutes_dropdown)
+        service_date_widgets_layout.addWidget(min_sep)
+        service_date_widgets_layout.addStretch()
         
         # Add to main layout
         main_layout.addLayout(service_date_widgets_layout)
@@ -77,20 +98,25 @@ class ServiceConfigWindow(QDialog):
     
     def accept(self):
         self.selected_day = self.week_day_dropdown.currentText()
-        self.selected_time = self.time_dropdown.currentText()
+        self.selected_time = f"{self.hours_dropdown.currentText()}:{self.minutes_dropdown.currentText()}:00"
 
         super().accept()
     
-    def __generate_hours_minutes(self) -> list:
-        hours_minutes = []
+    def __generate_hours_minutes(self) -> list[list]:
+        hours = []
+        minutes = []
 
-        # Generate times from 00:00 to 23:55 in 5-minute intervals
+        # Generate hours from 0-24
         for hour in range(24):
-            for minute in range(0, 60, 5):
-                time_str = f"{hour:02d}:{minute:02d}:00"
-                hours_minutes.append(time_str)
+            hour_str = f"{hour:02d}"
+            hours.append(hour_str)
 
-        return hours_minutes
+        # Generate minutes from 1-60 in 5 minute intervals
+        for minute in range(0, 60, 5):
+            minute_str = f"{minute:02d}"
+            minutes.append(minute_str)
+
+        return [hours, minutes]
 
 
 class AlertDialog(QDialog):

@@ -1,5 +1,5 @@
 G_LOG_LEVEL = 1
-VERSION: tuple = (0, 0, 4)
+VERSION: tuple = (0, 0, 5)
 HOST: str = "r0fld4nc3"
 APP_NAME: str = "PyGitDatBack"
 COMMIT_CUTOFF_DAYS = 360
