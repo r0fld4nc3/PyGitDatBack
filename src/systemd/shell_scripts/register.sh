@@ -73,4 +73,6 @@ fi
 # rm "$SERVICE_FILE_IN"
 # rm "$TIMER_FILE_IN"
 
+systemctl status "$TIMER_FILE"
+
 echo "Service $SERVICE_FILE successfully registered and started."

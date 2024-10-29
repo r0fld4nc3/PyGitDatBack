@@ -89,7 +89,7 @@ class Repository(git.Repo):
             
             self.cloned_to = clone_dest
             backup_dir = self.set_backup_dir(clone_dest)
-            self.__remove_dir(clone_dest) # Remove target directory avoid fatal clone error
+            # self.__remove_dir(clone_dest) # Remove target directory avoid fatal clone error
             
             # Clone the repo/branch
             successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
