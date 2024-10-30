@@ -1,9 +1,11 @@
 [Unit]
 Description=PyGitDatBack No-UI Background Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+ExecStartPre=/bin/sleep 5
 ExecStart={{PYTHON_PATH}} {{PATH_TO_ENTRY_POINT}}
 WorkingDirectory={{PATH_TO_PROJECT}}
 User=1000
