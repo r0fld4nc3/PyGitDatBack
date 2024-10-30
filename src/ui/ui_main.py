@@ -68,10 +68,8 @@ class ServiceConfigWindow(QDialog):
         if self.selected_min in times[1]:
             self.minutes_dropdown.setCurrentText(self.selected_min)
 
-        hour_sep = QLabel("h:")
-        min_sep = QLabel("min")
+        hour_sep = QLabel(":")
         hour_sep.setContentsMargins(0, 0, 0, 0)
-        min_sep.setContentsMargins(0, 0, 0, 0)
 
         # Accept button
         ok_button = QPushButton("Accept")
@@ -84,7 +82,6 @@ class ServiceConfigWindow(QDialog):
         service_date_widgets_layout.addWidget(self.hours_dropdown)
         service_date_widgets_layout.addWidget(hour_sep)
         service_date_widgets_layout.addWidget(self.minutes_dropdown)
-        service_date_widgets_layout.addWidget(min_sep)
         service_date_widgets_layout.addStretch()
         
         # Add to main layout
