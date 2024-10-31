@@ -714,6 +714,10 @@ class GitDatBackUI(QWidget):
 
         for index in sorted(selected, reverse=True):
             entry_to_remove = self.entries[index.row()]
+            entry_url = entry_to_remove.get_url()
+
+            self.settings.remove_repo(entry_url)
+
             self.entries.remove(entry_to_remove)
             self.entry_table.removeRow(index.row())
 

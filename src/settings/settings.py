@@ -71,7 +71,7 @@ class Settings:
     def save_repo(self, repo_url, do_pull, timestamp:str = "", branches: list = []):
         repo_url = str(repo_url).strip()
 
-        logger.info(f"Save repo {repo_url}\n{do_pull=}, {timestamp=}, {branches=}")
+        logger.info(f"Save repository {repo_url}\n{do_pull=}, {timestamp=}, {branches=}")
 
         if self.KEY_REPOS not in self.settings:
             logger.info(f"Creating key {self.KEY_REPOS}")
@@ -103,6 +103,23 @@ class Settings:
                 info_section[self.KEY_BRANCHES] = branches
 
         # self.save_config()
+
+    def remove_repo(self, repo_url) -> bool:
+        repo_url = str(repo_url).strip()
+
+        logger.info(f"Remove repository {repo_url}")
+
+        if self.KEY_REPOS not in self.settings:
+            logger.error(f"Key {self.KEY_REPOS} not present.")
+            return False
+
+        if repo_url in self.settings[self.KEY_REPOS]:
+            del self.settings[self.KEY_REPOS][repo_url]
+            logger.info(f"Successfully removed {repo_url}")
+        else:
+            return False
+
+        return True
 
     def get_repos(self) -> dict:
         return self.settings.get(self.KEY_REPOS, {})
