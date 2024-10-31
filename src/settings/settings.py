@@ -79,7 +79,7 @@ class Settings:
 
         if repo_url not in self.settings[self.KEY_REPOS]:
             logger.info(f"{repo_url} not in repo keys")
-            logger.debug(f"{self.settings[self.KEY_REPOS]=}")
+            logger.debug(f"{self.settings[self.KEY_REPOS]}")
             self.settings[self.KEY_REPOS][repo_url] = {
                 self.KEY_DO_PULL: do_pull,
                 self.KEY_LAST_PULLED: timestamp,

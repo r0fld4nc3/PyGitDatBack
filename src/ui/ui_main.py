@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 from typing import List
 from queue import Queue
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
@@ -9,10 +11,9 @@ from PySide6.QtWidgets import (
     QFileDialog, QDialogButtonBox, QTextEdit, QComboBox
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
-from datetime import time, timedelta
 
 from .utils import get_screen_info
-from conf_globals import G_LOG_LEVEL, VERSION
+from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS
 from log import create_logger
 from settings import Settings
 from libgit import Repository
@@ -20,6 +21,159 @@ from libgit import validate_github_url, get_branches_and_commits, api_status
 import systemd
 
 logger = create_logger(__name__, G_LOG_LEVEL)
+
+
+class WorkerSignals(QObject):
+    finished = Signal(str)
+    error = Signal(str, str)
+
+
+class BranchTask(QRunnable):
+    def __init__(self, url, callback):
+        super().__init__()
+        self.url = url
+        self.callback = callback
+
+    def run(self):
+        try:
+            result = get_branches_and_commits(self.url)
+            self.callback(result)
+        except Exception as e:
+            logger.error(f"Error obtaining branches and commits for repository {self.url}: {e}")
+
+class CloneRepoTask(QRunnable):
+    def __init__(self, repo, path, entry):
+        super().__init__()
+        self.repo = repo
+        self.path = path
+        self.entry = entry
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            logger.info(f"Cloning repository {self.repo.url} into {self.path}")
+            self.repo.clone_from(self.path)
+            self.signals.finished.emit(self.repo.url)
+        except Exception as e:
+            logger.error(f"Error cloning repository {self.repo.url}: {e}")
+            self.signals.error.emit(self.repo.url, str(e))
+
+
+class TaskQueue(QObject):
+    _task_lock = threading.Lock()
+    _ongoing_tasks: int = 0
+    MAX_CONCURRENT_TASKS: int = MAX_CONCURRENT_TASKS
+
+    def __init__(self):
+        super().__init__()
+        self.queue = Queue()
+        self.thread_pool = QThreadPool()
+        self.is_running = True
+        
+        self.worker_thread = QThread()
+        self.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.process_tasks)
+        self.worker_thread.start()
+
+    @classmethod
+    def get_ongoing_tasks(cls) -> int:
+        with cls._task_lock:
+            return cls._ongoing_tasks
+        
+    @classmethod
+    def increment_ongoing_tasks(cls) -> bool:
+        with cls._task_lock:
+            if cls._ongoing_tasks < cls.MAX_CONCURRENT_TASKS:
+                cls._ongoing_tasks += 1
+                return True
+            return False
+        
+    @classmethod
+    def decrement_ongoing_tasks(cls):
+        with cls._task_lock:
+            if cls._ongoing_tasks > 0:
+                cls._ongoing_tasks -= 1
+
+    def add_task(self, task: QRunnable | CloneRepoTask):
+        self.queue.put(task)
+        logger.debug(f"Put task: {task.entry.get_url()}")
+
+    def process_tasks(self):
+        while self.is_running:
+            if self.queue.qsize() == 0:
+                sleep(1) # Prevent busy waiting
+                continue
+
+            try:
+                # Peek without taking
+                task = self.queue.queue[0]
+
+                # Try to increment the task counter
+                if self.increment_ongoing_tasks():
+                    task = self.queue.get(timeout=1)
+                    logger.info(f"Got task {task.entry.get_url()}! Ongoing: {self.get_ongoing_tasks()}")
+
+                    # Wrap run method to handle completion
+                    original_run = task.run
+                    def wrapped_run():
+                        try:
+                            original_run()
+                        except Exception as e:
+                            logger.error(f"Error in wrapped run: {e}")
+                        finally:
+                            self.decrement_ongoing_tasks()
+                            logger.debug(f"Task completed. Remaining active tasks: {self.get_ongoing_tasks()}")
+
+                    task.run = wrapped_run
+
+                    # Start the task
+                    self.thread_pool.start(task)
+                    self.queue.task_done()
+                else:
+                    # If we can't process now, wait before trying again
+                    logger.debug(f"Max concurrent tasks reached ({self.MAX_CONCURRENT_TASKS}). Tasks in queue: {self.queue.qsize()}")
+                    sleep(1)
+                continue
+            except Exception as e:
+                logger.error(f"Error processing task: {e}")
+                self.decrement_ongoing_tasks()
+
+    def stop(self):
+        logger.info("Stopping Task Queue")
+        self.is_running = False
+        self.worker_thread.quit()
+        self.worker_thread.wait()
+
+    def cleanup(self):
+        self.stop()
+
+    @classmethod
+    def reset_task_counter(cls):
+        with cls._task_lock:
+            cls._ongoing_tasks = 0
+
+
+class AlignedWidget(QWidget):
+    def __init__(self, widget, alignment=Qt.AlignCenter, margins: tuple =None):
+        super().__init__()
+
+        if not margins:
+            margins = (0, 0, 0, 0)
+
+        if len(margins) != 4:
+            raise ValueError(f"Expected `margins` to have 4 elements, but got {len(margins)}: {margins}")
+        
+        # logger.debug(f"{margins=} ({widget})")
+
+        self.main_widget = widget
+        layout = QHBoxLayout()
+        layout.addWidget(self.main_widget, alignment=alignment)
+        layout.setContentsMargins(*margins)
+        
+        if isinstance(widget, QLabel):
+            self.main_widget.setStyleSheet(f"padding-left: {margins[0]}px; padding-top: {margins[1]}px; padding-right: {margins[2]}px; padding-bottom: {margins[3]}px;")
+
+        self.setLayout(layout)
 
 
 class ServiceConfigWindow(QDialog):
@@ -148,104 +302,6 @@ class AlertDialog(QDialog):
         self.exec()
 
 
-class TaskQueue(QObject):
-    def __init__(self):
-        super().__init__()
-        self.queue = Queue()
-        self.thread_pool = QThreadPool()
-        self.is_running = True
-        
-        self.worker_thread = QThread()
-        self.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.process_tasks)
-        self.worker_thread.start()
-
-    def add_task(self, task: QRunnable):
-        self.queue.put(task)
-
-    def process_tasks(self):
-        while self.is_running:
-            if self.queue.qsize() == 0:
-                continue
-
-            try:
-                task = self.queue.get(timeout=1)
-                logger.info(f"Submitting {task} to thread pool")
-                self.thread_pool.start(task)
-                sleep(1)
-                self.queue.task_done()
-            except Exception as e:
-                logger.error(f"Error processing task: {e}")
-
-    def stop(self):
-        logger.info("Stopping Task Queue")
-        self.is_running = False
-        self.worker_thread.quit()
-        self.worker_thread.wait()
-
-    def cleanup(self):
-        self.stop()
-
-
-class WorkerSignals(QObject):
-    finished = Signal(str)
-    error = Signal(str, str)
-
-
-class BranchTask(QRunnable):
-    def __init__(self, url, callback):
-        super().__init__()
-        self.url = url
-        self.callback = callback
-
-    def run(self):
-        try:
-            result = get_branches_and_commits(self.url)
-            self.callback(result)
-        except Exception as e:
-            logger.error(f"Error obtaining branches and commits for repository {self.url}: {e}")
-
-class CloneRepoTask(QRunnable):
-    def __init__(self, repo, path, entry):
-        super().__init__()
-        self.repo = repo
-        self.path = path
-        self.entry = entry
-        self.signals = WorkerSignals()
-
-    def run(self):
-        try:
-            logger.info(f"Cloning repository {self.repo.url} into {self.path}")
-            self.repo.clone_from(self.path)
-            self.signals.finished.emit(self.repo.url)
-        except Exception as e:
-            logger.error(f"Error cloning repository {self.repo.url}: {e}")
-            self.signals.error.emit(self.repo.url, str(e))
-
-
-class AlignedWidget(QWidget):
-    def __init__(self, widget, alignment=Qt.AlignCenter, margins: tuple =None):
-        super().__init__()
-
-        if not margins:
-            margins = (0, 0, 0, 0)
-
-        if len(margins) != 4:
-            raise ValueError(f"Expected `margins` to have 4 elements, but got {len(margins)}: {margins}")
-        
-        # logger.debug(f"{margins=} ({widget})")
-
-        self.main_widget = widget
-        layout = QHBoxLayout()
-        layout.addWidget(self.main_widget, alignment=alignment)
-        layout.setContentsMargins(*margins)
-        
-        if isinstance(widget, QLabel):
-            self.main_widget.setStyleSheet(f"padding-left: {margins[0]}px; padding-top: {margins[1]}px; padding-right: {margins[2]}px; padding-bottom: {margins[3]}px;")
-
-        self.setLayout(layout)
-
-
 class TableEntry(QWidget):
     def __init__(self, url: str):
         super().__init__()
@@ -288,7 +344,7 @@ class TableEntry(QWidget):
         """Sets the current timestamp on the timestamp_item."""
         _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
         self.timestamp_label.setText(_timestamp)
-        logger.info(f"Set timestamp {_timestamp} of widget {self.timestamp_label}")
+        logger.info(f"Set timestamp {_timestamp} of entry {self.get_url()}")
 
     def get_url(self) -> str:
         return self.url_label.text()
@@ -714,8 +770,6 @@ class GitDatBackUI(QWidget):
         self.info_label.setText(what.strip())
 
     def pull_repos(self):
-        logger.warning("Pull Repos lacks full implementation.")
-
         self.set_buttons_state_while_task(False)
 
         repos = []
@@ -725,7 +779,7 @@ class GitDatBackUI(QWidget):
             url = entry.get_url()
             
             logger.debug(f"{url=}")
-            logger.debug(f"    {is_checked=}")
+            logger.debug(f"{is_checked=}")
             
             if is_checked:
                 repos.append((Repository(url), entry))
@@ -737,6 +791,7 @@ class GitDatBackUI(QWidget):
 
         for repo, entry in repos:
             clone_task = CloneRepoTask(repo, self.repo_backup_path, entry)
+            logger.debug(f"Task {entry.get_url()}")
 
             # Connect the signals
             clone_task.signals.finished.connect(self.on_clone_success)
@@ -766,15 +821,26 @@ class GitDatBackUI(QWidget):
         save_to = settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         logger.info(f"Cloning to root directory: {str(save_to)}")
 
-        for repo in repos:
+        # Function to clone a repository and update the settings
+        def clone_and_update_repo(repo: Repository):
             repo.clone_from(save_to)
             url = repo.url
             do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
             timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
             branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
-            
             settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
-        
+            logger.info(f"Finished processing {url}")
+
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS) as executor:
+            future_to_repo = {executor.submit(clone_and_update_repo, repo): repo for repo in repos}
+
+            for future in as_completed(future_to_repo):
+                repo = future_to_repo[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Error pulling repository: {repo.url}: {e}")
+            
         logger.info("Pull Repos No UI finished")
 
     def on_clone_success(self, repo_name):
@@ -786,7 +852,7 @@ class GitDatBackUI(QWidget):
 
         self.tell(f"Cloning completed for: {repo_name}")
 
-    def set_button_state(button_widget: QPushButton, state: bool):
+    def set_button_state(self,button_widget: QPushButton, state: bool):
         button_widget.setEnabled(state)
 
     def set_buttons_state_while_task(self, state: bool):
@@ -867,7 +933,7 @@ class GitDatBackUI(QWidget):
             branches = entry.branches_to_pull
             do_pull = entry.pull_checkbox.isChecked()
             timestamp = entry.timestamp_label.text()
-            if timestamp == "n/a" or not timestamp:
+            if timestamp in ["n/a", "Fetching..."] or not timestamp:
                 timestamp = ""
 
             self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp, branches=branches)
