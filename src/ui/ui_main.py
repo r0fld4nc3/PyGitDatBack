@@ -400,11 +400,18 @@ class GitDatBackUI(QWidget):
         self.settings = Settings()
         self.settings.load_config() # Load the config
 
+        window_size = self.settings.get_window_size()
+        logger.info(f"{window_size=}")
+
         self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
         # Set app constraints
         self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
-        self.resize(QSize(810, 450))
+        if not window_size:
+            # Default
+            self.resize(QSize(810, 450))
+        else:
+            self.resize(QSize(window_size[0], window_size[1]))
 
         # Tasks
         self.task_queue = TaskQueue()
@@ -941,6 +948,12 @@ class GitDatBackUI(QWidget):
                 timestamp = ""
 
             self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+
+        # Save the window size
+        width = self.frameGeometry().width()
+        height = self.frameGeometry().height() - 36
+        self.settings.save_window_size(width, height)
+
         self.settings.save_config()
         
         logger.info("Shutdown")

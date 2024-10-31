@@ -34,6 +34,7 @@ class Settings:
     KEY_DO_PULL = "do_pull"
     KEY_LAST_PULLED = "last_pulled"
     KEY_BRANCHES = "branches"
+    KEY_WIN_SIZE = "window_size"
 
     def __init__(self):
         self.settings = {
@@ -41,7 +42,8 @@ class Settings:
             self.KEY_SCHEDULED_DAY: "",
             self.KEY_SCHEDULED_TIME: "",
             self.KEY_SERVICE_SET: False,
-            self.KEY_REPOS: {}
+            self.KEY_REPOS: {},
+            self.KEY_WIN_SIZE: ""
         }
         self._config_file_name = "pygitdatback-settings.json"
         self.config_dir = Path(CONFIG_FOLDER)
@@ -123,6 +125,14 @@ class Settings:
 
     def get_repos(self) -> dict:
         return self.settings.get(self.KEY_REPOS, {})
+    
+    def save_window_size(self, width: int, height: int):
+        self.settings[self.KEY_WIN_SIZE] = [width, height]
+
+    def get_window_size(self) -> list:
+        width_height = self.settings.get(self.KEY_WIN_SIZE, [])
+        logger.info(f"{width_height=}")
+        return width_height
 
     def save_config(self) -> Path:
         if self.config_dir == '' or not Path(self.config_dir).exists():
