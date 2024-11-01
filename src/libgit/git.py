@@ -4,6 +4,7 @@ import stat
 import shutil
 import requests
 import psutil
+import time
 from pathlib import Path
 from typing import Tuple, Union
 from urllib.parse import urlparse
@@ -32,6 +33,9 @@ class Repository(git.Repo):
         self.head_name = ""
         self.repo_branches: list[git.RemoteReference] = list()
         self.active_branches: list[git.RemoteReference] = list()
+
+        self.max_retries = 3
+        self.retry_delay = 30 # seconds
         
         self.owner, self.name = parse_owner_name_from_url(url)
         # self.head_name = self._get_head()
@@ -89,7 +93,6 @@ class Repository(git.Repo):
             
             self.cloned_to = clone_dest
             backup_dir = self.set_backup_dir(clone_dest)
-            # self.__remove_dir(clone_dest) # Remove target directory avoid fatal clone error
             
             # Clone the repo/branch
             successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
@@ -261,19 +264,22 @@ class Repository(git.Repo):
             logger.info(f"[{self.name}] Deleting backup-dir: {backup_dir}")
             self.__remove_dir(backup_dir)
 
-        os.rename(dir_path, backup_dir)
-
-        # try:
-        #     shutil.copytree(dir_path, backup_dir, dirs_exist_ok=True)
-        # except Exception as e:
-        #     logger.error(f"Error setting backup directory: {e}")
+            if dir_path.exists():
+                try:
+                    os.rename(dir_path, backup_dir)
+                except Exception as e:
+                    logger.error(f"Error in rename: {e}")
+        else:
+            if dir_path.exists():
+                logger.info(f"Removing tree {dir_path}")
+                self.__remove_dir(dir_path) # Remove the clone destination. Avoid fatal error
         
         return backup_dir
 
 
     def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
-        logger.debug(f"[{self.name}] shutil.rmtree({to_remove}, onerror={_rmtree_on_error})")
+        logger.debug(f"[{self.name}] shutil.rmtree({to_remove}")
         try:
             shutil.rmtree(to_remove, onerror=_rmtree_on_error) # 3.12 deprecates onerror
         except Exception as e:
@@ -288,15 +294,38 @@ class Repository(git.Repo):
         return True
 
     def __clone_from_basecls(self, url, dest, *args, **kwargs) -> Tuple[bool, Path]:
+        attempt = 0
         successful_clone = False
-        
-        logger.debug(f"[{self.name}] Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
-        
-        try:
-            self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
-            successful_clone = True
-        except Exception as e:
-            logger.error(f"[{self.name}] {e}", exc_info=1)
+
+        # Configure longer timeouts
+        git_options = {
+            'git_options': {
+                '-c': [
+                    'http.lowSpeedLimit=1000',
+                    'http.lowSpeedTime=60',
+                    'http.postBuffer=524288000',
+                    'http.timeout=300'
+                ]
+            }
+        }
+        # kwargs.update(git_options)
+
+        while attempt < self.max_retries:
+            try:
+                logger.info(f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
+                self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
+                successful_clone = True
+                logger.info(f"[{self.name}] Successful clone. Breaking attempt loop.")
+                break # Important...
+            except Exception as e:
+                attempt += 1
+                logger.warning(f"[{self.name}] Clone attempt {attempt} failed: {e}")
+
+                if attempt < self.max_retries:
+                    logger.info(f"[{self.name}] Waiting {self.retry_delay} seconds before retry...")
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error(f"[{self.name}] All {self.max_retries} attempts failed", exc_info=1)
 
         return successful_clone, dest
     
