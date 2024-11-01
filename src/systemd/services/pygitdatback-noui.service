@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 5
+ExecStartPre=/bin/bash -c 'until ping -c1 github.com >/dev/null 2>&1; do sleep 5; done'
 ExecStart={{PYTHON_PATH}} {{PATH_TO_ENTRY_POINT}}
 WorkingDirectory={{PATH_TO_PROJECT}}
 User=1000
