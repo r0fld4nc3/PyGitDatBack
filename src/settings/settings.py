@@ -165,10 +165,15 @@ class Settings:
             locations = [locations]
         
         repo = self.settings[self.KEY_REPOS].get(url)
-        repo_locations = repo.get(self.KEY_REPO_LOC, [])
+
+        if not repo:
+            logger.info(f"No repository present: {url}")
+            return []
+        
+        repo_locations: list = repo.get(self.KEY_REPO_LOC, [])
 
         # Extend avoid duplicates
-        repo_locations.extend([str(loc) for loc in locations if loc not in repo_locations])
+        repo_locations.extend([str(loc) for loc in locations if str(loc) not in repo_locations])
 
         self.settings[self.KEY_REPOS][url][self.KEY_REPO_LOC] = locations
 
@@ -178,6 +183,10 @@ class Settings:
         logger.info(f"Getting locations for repository {url}")
         
         repo = self.settings[self.KEY_REPOS].get(url)
+        if not repo:
+            logger.info(f"Unable to obtain repository: {url}")
+            return []
+        
         locations = repo.get(self.KEY_REPO_LOC, [])
 
         logger.info(f"Repository locations: {locations}")

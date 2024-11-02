@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from typing import List
+import shutil
 from queue import Queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,7 +9,7 @@ from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, 
-    QFileDialog, QDialogButtonBox, QTextEdit, QComboBox
+    QFileDialog, QDialogButtonBox, QTextEdit, QComboBox, QMessageBox
 )
 from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
 
@@ -17,7 +18,7 @@ from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS
 from log import create_logger
 from settings import Settings
 from libgit import Repository
-from libgit import validate_github_url, get_branches_and_commits, api_status
+from libgit import validate_github_url, get_branches_and_commits, parse_owner_name_from_url
 import systemd
 
 logger = create_logger(__name__, G_LOG_LEVEL)
@@ -718,9 +719,38 @@ class GitDatBackUI(QWidget):
 
     def remove_selected_entries(self):
         selected = self.entry_table.selectionModel().selectedRows()
+        
+        if not selected:
+            logger.info("Nothing selected to remove.")
+            return
+
+        logger.info("Collecting URLs to display in pop-up")
+        cap = 20
+        urls_to_remove = []
+        for count, index in enumerate(selected):
+            entry = self.entries[index.row()]
+            url = entry.get_url()
+            if url and count < cap:
+                urls_to_remove.append(url)
+            else:
+                logger.info("Collection cap reached.")
+                urls_to_remove.append("(...)")
+                break
+
+        logger.debug(f"{urls_to_remove=}")
 
         # TOOD: Ask remove locally pulled repositories
-        
+        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{'\n'.join(urls_to_remove)}"
+        qm = QMessageBox
+        logger.debug(query)
+        query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No)
+        remove_from_disk = False
+
+        if query_ans == qm.Yes:
+            logger.debug("[remove_selected_entries] MessageBox: Yes")
+            remove_from_disk = True
+        else:
+            logger.debug("[remove_selected_entries] MessageBox: No")
 
         for index in sorted(selected, reverse=True):
             entry_to_remove = self.entries[index.row()]
@@ -730,6 +760,51 @@ class GitDatBackUI(QWidget):
 
             self.entries.remove(entry_to_remove)
             self.entry_table.removeRow(index.row())
+
+        # Now remove from disk
+        persist = []
+        
+        # Add the saved location in settings
+        persist.append(self.settings.get_save_root_dir())
+
+        # Add the input field location, in case it is not saved in settings yet
+        if str(self.repos_backup_path) not in persist:
+            persist.append(str(self.repos_backup_path))
+
+        logger.debug(f"{persist=}")
+
+        if remove_from_disk:
+            for url in urls_to_remove:
+                repo_locations = self.settings.get_repo_locations(url)
+                # Extend make unique and list of Pathlib paths
+                for p in persist:
+                    if str(p) not in repo_locations:
+                        repo_locations.append(str(p))
+                repo_locations = [Path(loc) for loc in repo_locations]
+
+                for loc_path in repo_locations:
+                    owner, name = parse_owner_name_from_url(url)
+                    backup = loc_path / f"backup-{name}"
+                    clone = loc_path / name
+
+                    logger.debug(f"{backup=}")
+                    logger.debug(f"{clone=}")
+
+                    if backup.exists():
+                        logger.info(f"Attempting to remove backup directory {backup}")
+                        try:
+                            shutil.rmtree(backup)
+                            logger.info(f"Removed backup directory {backup}")
+                        except Exception as e:
+                            logger.error(f"Error removing backup directory {backup}: {e}")
+                    
+                    if clone.exists():
+                        logger.info(f"Attempting to remove clone directory {clone}")
+                        try:
+                            shutil.rmtree(clone)
+                            logger.info(f"Removed clone directory {clone}")
+                        except Exception as e:
+                            logger.error(f"Error removing clone directory {clone}: {e}")
 
     def set_selection_selected(self):
         selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
