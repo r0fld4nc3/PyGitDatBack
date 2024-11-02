@@ -851,7 +851,8 @@ class GitDatBackUI(QWidget):
                     future.result()
                 except Exception as e:
                     logger.error(f"Error pulling repository: {repo.url}: {e}")
-            
+        
+        settings.save_config()
         logger.info("Pull Repos No UI finished")
 
     def on_clone_success(self, repo_name):
