@@ -716,7 +716,7 @@ class GitDatBackUI(QWidget):
                 return True
         
         return False
-
+    
     def remove_selected_entries(self):
         selected = self.entry_table.selectionModel().selectedRows()
         
@@ -724,23 +724,31 @@ class GitDatBackUI(QWidget):
             logger.info("Nothing selected to remove.")
             return
 
-        logger.info("Collecting URLs to display in pop-up")
-        cap = 20
+        logger.info("Collecting URLs & Names to display in pop-up")
+        display_cap = 20
         urls_to_remove = []
+        names_to_remove = []
+        
         for count, index in enumerate(selected):
             entry = self.entries[index.row()]
             url = entry.get_url()
-            if url and count < cap:
+            _, name = parse_owner_name_from_url(url)
+
+            if url:
                 urls_to_remove.append(url)
+
+            # Cap for the display
+            if url and count < display_cap:
+                names_to_remove.append(name)
             else:
-                logger.info("Collection cap reached.")
-                urls_to_remove.append("(...)")
-                break
+                name = "(...)"
+                if name not in names_to_remove:
+                    logger.info("Collection cap reached.")
+                    names_to_remove.append(name)
 
-        logger.debug(f"{urls_to_remove=}")
+        logger.debug(f"{names_to_remove=}")
 
-        # TOOD: Ask remove locally pulled repositories
-        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{'\n'.join(urls_to_remove)}"
+        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{'\n'.join(names_to_remove)}"
         qm = QMessageBox
         logger.debug(query)
         query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No)
@@ -751,15 +759,6 @@ class GitDatBackUI(QWidget):
             remove_from_disk = True
         else:
             logger.debug("[remove_selected_entries] MessageBox: No")
-
-        for index in sorted(selected, reverse=True):
-            entry_to_remove = self.entries[index.row()]
-            entry_url = entry_to_remove.get_url()
-
-            self.settings.remove_repo(entry_url)
-
-            self.entries.remove(entry_to_remove)
-            self.entry_table.removeRow(index.row())
 
         # Now remove from disk
         persist = []
@@ -805,6 +804,16 @@ class GitDatBackUI(QWidget):
                             logger.info(f"Removed clone directory {clone}")
                         except Exception as e:
                             logger.error(f"Error removing clone directory {clone}: {e}")
+        
+        # Remove from UI
+        for index in sorted(selected, reverse=True):
+            entry_to_remove = self.entries[index.row()]
+            entry_url = entry_to_remove.get_url()
+
+            self.settings.remove_repo(entry_url)
+
+            self.entries.remove(entry_to_remove)
+            self.entry_table.removeRow(index.row())
 
     def set_selection_selected(self):
         selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
