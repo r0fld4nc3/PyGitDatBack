@@ -276,7 +276,6 @@ class Repository(git.Repo):
         
         return backup_dir
 
-
     def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
         logger.debug(f"[{self.name}] shutil.rmtree({to_remove}")

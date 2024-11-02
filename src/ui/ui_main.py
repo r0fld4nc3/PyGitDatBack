@@ -403,7 +403,7 @@ class GitDatBackUI(QWidget):
         window_size = self.settings.get_window_size()
         logger.info(f"{window_size=}")
 
-        self.repo_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
+        self.repos_backup_path = self.settings.get_save_root_dir(fallback=(Path(__name__).parent.parent / "tests/gitclone/repos").resolve())
         
         # Set app constraints
         self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
@@ -491,7 +491,7 @@ class GitDatBackUI(QWidget):
         # Backup Path Input
         self.backup_path_input = QLineEdit()
         self.backup_path_input.setPlaceholderText("Root folder for repositories...")
-        self.backup_path_input.setText(str(self.repo_backup_path))
+        self.backup_path_input.setText(str(self.repos_backup_path))
         self.backup_path_input.editingFinished.connect(self.set_backup_path)
 
         # Backup Path Pick Button
@@ -719,6 +719,9 @@ class GitDatBackUI(QWidget):
     def remove_selected_entries(self):
         selected = self.entry_table.selectionModel().selectedRows()
 
+        # TOOD: Ask remove locally pulled repositories
+        
+
         for index in sorted(selected, reverse=True):
             entry_to_remove = self.entries[index.row()]
             entry_url = entry_to_remove.get_url()
@@ -761,7 +764,7 @@ class GitDatBackUI(QWidget):
         self.tell("Deselected all.")
 
     def pick_backup_path(self):
-        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.repo_backup_path))
+        choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.repos_backup_path))
 
         if choice:
             self.set_backup_path()
@@ -774,7 +777,7 @@ class GitDatBackUI(QWidget):
         if choice:
             folder_path = Path(self.backup_path_input.text()).resolve()
             self.backup_path_input.setText(str(folder_path))
-            self.repo_backup_path = folder_path
+            self.repos_backup_path = folder_path
             logger.info(f"Backup path: {folder_path}")
 
     def tell(self, what: str):
@@ -801,7 +804,7 @@ class GitDatBackUI(QWidget):
             return
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.repo_backup_path, entry)
+            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry)
             logger.debug(f"Task {entry.get_url()}")
 
             # Connect the signals
@@ -840,6 +843,8 @@ class GitDatBackUI(QWidget):
             timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
             branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
             settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+            # Add to repo locations
+            settings.add_repo_locations(url, save_to)
             logger.info(f"Finished processing {url}")
 
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS) as executor:
@@ -854,15 +859,6 @@ class GitDatBackUI(QWidget):
         
         settings.save_config()
         logger.info("Pull Repos No UI finished")
-
-    def on_clone_success(self, repo_name):
-        logger.info(f"Cloning completed for: {repo_name}")
-
-        for entry in self.entries:  
-            if entry.url_label.text() == repo_name:
-                entry.set_timestamp_now()
-
-        self.tell(f"Cloning completed for: {repo_name}")
 
     def set_button_state(self,button_widget: QPushButton, state: bool):
         button_widget.setEnabled(state)
@@ -879,6 +875,18 @@ class GitDatBackUI(QWidget):
         self.set_button_state(self.register_service_button, state)
         self.set_button_state(self.unregister_service_button, state)
         self.set_button_state(self.pull_button, state)
+
+    def on_clone_success(self, repo_url):
+        logger.info(f"Cloning completed for: {repo_url}")
+
+        for entry in self.entries:  
+            if entry.url_label.text() == repo_url:
+                entry.set_timestamp_now()
+
+        # Add to repo locations
+        self.settings.add_repo_locations(repo_url, self.repos_backup_path)
+
+        self.tell(f"Cloning completed for: {repo_url}")
                 
     def on_clone_error(self, repo_name, error_msg):
         logger.error(f"Error cloning repository {repo_name}: {error_msg}")
@@ -937,7 +945,7 @@ class GitDatBackUI(QWidget):
         self.task_queue.stop()
         
         # Save root directory for repo backups
-        self.settings.set_save_root_dir(self.repo_backup_path)
+        self.settings.set_save_root_dir(self.repos_backup_path)
         
         # Save state of each widget entry in the table
         for entry in self.iter_entries():

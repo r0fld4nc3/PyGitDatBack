@@ -13,18 +13,6 @@ CONFIG_FOLDER = get_os_env_config_folder() / HOST / APP_NAME
 logger = create_logger("Settings", G_LOG_LEVEL)
 
 
-# Template structure idea
-{
-    "save_to": "",
-    "repos": {
-        "repoUrl1": {
-            "do_pull": False,
-            "last_pulled": "",
-            "branches": ""
-        }
-    }
-}
-
 class Settings:
     KEY_SAVE_TO = "save_to"
     KEY_SERVICE_SET = "background_service_set"
@@ -35,6 +23,7 @@ class Settings:
     KEY_LAST_PULLED = "last_pulled"
     KEY_BRANCHES = "branches"
     KEY_WIN_SIZE = "window_size"
+    KEY_REPO_LOC = "locations"
 
     def __init__(self):
         self.settings = {
@@ -82,10 +71,13 @@ class Settings:
         if repo_url not in self.settings[self.KEY_REPOS]:
             logger.info(f"{repo_url} not in repo keys")
             logger.debug(f"{self.settings[self.KEY_REPOS]}")
+            
+            # Structure the repository data
             self.settings[self.KEY_REPOS][repo_url] = {
                 self.KEY_DO_PULL: do_pull,
                 self.KEY_LAST_PULLED: timestamp,
-                self.KEY_BRANCHES: branches
+                self.KEY_BRANCHES: branches,
+                self.KEY_REPO_LOC: []
             }
         else:
             self.settings[self.KEY_REPOS][repo_url][self.KEY_DO_PULL] = do_pull
@@ -165,6 +157,32 @@ class Settings:
     def set_scheduled_time(self, time: str) -> str:
         logger.info(f"Set Scheduled Time to {time}")
         self.settings[self.KEY_SCHEDULED_TIME] = time
+
+    def add_repo_locations(self, url, locations: list):
+        logger.info(f"Set locations for repository {url}")
+
+        if not isinstance(locations, list):
+            locations = [locations]
+        
+        repo = self.settings[self.KEY_REPOS].get(url)
+        repo_locations = repo.get(self.KEY_REPO_LOC, [])
+
+        # Extend avoid duplicates
+        repo_locations.extend([str(loc) for loc in locations if loc not in repo_locations])
+
+        self.settings[self.KEY_REPOS][url][self.KEY_REPO_LOC] = locations
+
+        logger.info(f"New repository locations: {repo_locations}")
+
+    def get_repo_locations(self, url) -> list:
+        logger.info(f"Getting locations for repository {url}")
+        
+        repo = self.settings[self.KEY_REPOS].get(url)
+        locations = repo.get(self.KEY_REPO_LOC, [])
+
+        logger.info(f"Repository locations: {locations}")
+
+        return locations
 
     def load_config(self) -> dict:
         if self.config_dir == '' or not Path(self.config_dir).exists()\
