@@ -16,7 +16,10 @@ logger = create_logger("Settings", G_LOG_LEVEL)
 class Settings:
     KEY_SAVE_TO = "save_to"
     KEY_SERVICE_SET = "background_service_set"
-    KEY_SCHEDULED_DAY = "schedule_svc_day"
+    KEY_SCHEDULED_TYPE = "schedule_type"
+    KEY_SCHEDULED_WEEK_DAY = "schedule_svc_week_day"
+    KEY_SCHEDULED_MONTH_DAY = "schedule_svc_month_day"
+    KEY_SCHEDULED_MONTH = "schedule_svc_month"
     KEY_SCHEDULED_TIME = "schedule_svc_time"
     KEY_REPOS = "repos"
     KEY_DO_PULL = "do_pull"
@@ -28,7 +31,10 @@ class Settings:
     def __init__(self):
         self.settings = {
             self.KEY_SAVE_TO: "",
-            self.KEY_SCHEDULED_DAY: "",
+            self.KEY_SCHEDULED_TYPE: "",
+            self.KEY_SCHEDULED_MONTH: "",
+            self.KEY_SCHEDULED_MONTH_DAY: "",
+            self.KEY_SCHEDULED_WEEK_DAY: "",
             self.KEY_SCHEDULED_TIME: "",
             self.KEY_SERVICE_SET: False,
             self.KEY_REPOS: {},
@@ -144,12 +150,33 @@ class Settings:
         self.settings[self.KEY_SERVICE_SET] = status
         logger.info(f"Set background service status to: {status}")
 
-    def get_scheduled_day(self) -> str:
-        return self.settings.get(self.KEY_SCHEDULED_DAY, "")
+    def get_schedule_type(self) -> str:
+        return self.settings.get(self.KEY_SCHEDULED_TYPE, "")
     
-    def set_scheduled_day(self, day: str) -> str:
+    def set_schedule_type(self, schedule_type: str):
+        self.settings[self.KEY_SCHEDULED_TYPE] = schedule_type
+        logger.info(f"Set schedule type: {schedule_type}")
+    
+    def get_scheduled_week_day(self) -> str:
+        return self.settings.get(self.KEY_SCHEDULED_WEEK_DAY, "")
+    
+    def set_scheduled_week_day(self, day: str):
         logger.info(f"Set Scheduled Day to {day}")
-        self.settings[self.KEY_SCHEDULED_DAY] = day
+        self.settings[self.KEY_SCHEDULED_WEEK_DAY] = day
+
+    def get_scheduled_month_day(self) -> str:
+        return self.settings.get(self.KEY_SCHEDULED_MONTH_DAY, "")
+    
+    def set_scheduled_month_day(self, day: str):
+        logger.info(f"Set Scheduled Month Day to {day}")
+        self.settings[self.KEY_SCHEDULED_MONTH_DAY] = day
+    
+    def get_scheduled_month(self) -> int:
+        return self.settings.get(self.KEY_SCHEDULED_MONTH, 1)
+    
+    def set_scheduled_month(self, month: int):
+        logger.info(f"Set Scheduled Month to {month}")
+        self.settings[self.KEY_SCHEDULED_MONTH] = month
     
     def get_scheduled_time(self) -> str:
         return self.settings.get(self.KEY_SCHEDULED_TIME, "")

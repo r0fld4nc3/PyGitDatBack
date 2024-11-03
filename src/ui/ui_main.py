@@ -188,11 +188,15 @@ class ServiceConfigWindow(QDialog):
         self.settings = Settings()
         self.settings.load_config()
 
-        self.selected_day = self.settings.get_scheduled_day()
+        self.selected_type = self.settings.get_schedule_type()
+        self.selected_week_day = self.settings.get_scheduled_week_day()
+        self.selected_month_day = self.settings.get_scheduled_month_day()
+        self.selected_month = self.settings.get_scheduled_month()
         self.selected_time = self.settings.get_scheduled_time()
         self.selected_hour = self.selected_time.split(':')[0]
         self.selected_min = self.selected_time.split(':')[1]
 
+        logger.debug(f"{self.selected_type=}")
         logger.debug(f"{self.selected_time=}")
         logger.debug(f"{self.selected_hour=}")
         logger.debug(f"{self.selected_min=}")
@@ -200,16 +204,39 @@ class ServiceConfigWindow(QDialog):
         main_layout = QVBoxLayout()
 
         service_date_widgets_layout = QHBoxLayout()
-        
-        # Schedule Widget
-        date_widgets_label = QLabel("Schedule:")
+
+        # Schedule Type Widget
+        # schedule_type_options = [systemd.ScheduleTypes.DAILY.value, systemd.ScheduleTypes.WEEKLY.value, systemd.ScheduleTypes.YEARLY.value, systemd.ScheduleTypes.MONTHLY.value, systemd.ScheduleTypes.MONTH_SPEC.value, systemd.ScheduleTypes.EVERY.value]
+        schedule_type_options = [systemd.ScheduleTypes.DAILY.value, systemd.ScheduleTypes.WEEKLY.value, systemd.ScheduleTypes.MONTHLY.value, systemd.ScheduleTypes.MONTH_SPEC.value]
+        self.schedule_type_dropdown = QComboBox()
+        self.schedule_type_dropdown.addItems(schedule_type_options)
+        if self.selected_type in schedule_type_options:
+            self.schedule_type_dropdown.setCurrentText(self.selected_type)
+        else:
+            self.schedule_type_dropdown.setCurrentText(systemd.ScheduleTypes.WEEKLY.value)
+        # Connect the dropdown selection changed to a slot
+        self.schedule_type_dropdown.currentTextChanged.connect(self.on_schedule_type_changed)
         
         # Week Days Combobox
-        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         self.week_day_dropdown = QComboBox()
-        self.week_day_dropdown.addItems(days)
-        if self.selected_day in days:
-            self.week_day_dropdown.setCurrentText(self.selected_day)
+        self.week_day_dropdown.addItems(week_days)
+        if self.selected_week_day in week_days:
+            self.week_day_dropdown.setCurrentText(self.selected_week_day)
+
+        # Month Days Combobox
+        month_days = [str(n) for n in range(1, 32)]
+        self.month_days_dropdown = QComboBox()
+        self.month_days_dropdown.addItems(month_days)
+        if self.selected_month_day in month_days:
+            self.month_days_dropdown.setCurrentText(self.selected_month_day)
+
+        # Months Combobox
+        months = ["January", "February", "March", "April", "May", "Jun", "July", "August", "September", "October", "Novemeber", "December"]
+        self.months_dropdown = QComboBox()
+        self.months_dropdown.addItems(months)
+        if self.selected_month in months:
+            self.months_dropdown.setCurrentText(months[self.selected_month-1])
 
         # Time Possibilities Combobox
         times = self.__generate_hours_minutes()
@@ -232,7 +259,9 @@ class ServiceConfigWindow(QDialog):
 
         # Add to service date layout
         service_date_widgets_layout.addStretch()
-        service_date_widgets_layout.addWidget(date_widgets_label)
+        service_date_widgets_layout.addWidget(self.schedule_type_dropdown)
+        service_date_widgets_layout.addWidget(self.month_days_dropdown)
+        service_date_widgets_layout.addWidget(self.months_dropdown)
         service_date_widgets_layout.addWidget(self.week_day_dropdown)
         service_date_widgets_layout.addWidget(self.hours_dropdown)
         service_date_widgets_layout.addWidget(hour_sep)
@@ -245,11 +274,36 @@ class ServiceConfigWindow(QDialog):
 
         self.setLayout(main_layout)
 
+        # Initial visibility setup based on current selection
+        self.on_schedule_type_changed(self.schedule_type_dropdown.currentText())
+
+    def on_schedule_type_changed(self, schedule_type):
+        # Default is Weekly
+        if schedule_type == systemd.ScheduleTypes.DAILY.value:
+            self.month_days_dropdown.hide()
+            self.months_dropdown.hide()
+            self.week_day_dropdown.hide()
+        elif schedule_type == systemd.ScheduleTypes.MONTHLY.value:
+            self.month_days_dropdown.show()
+            self.months_dropdown.hide()
+            self.week_day_dropdown.hide()
+        elif schedule_type == systemd.ScheduleTypes.MONTH_SPEC.value:
+            self.month_days_dropdown.show()
+            self.months_dropdown.show()
+            self.week_day_dropdown.hide()
+        else:
+            # Default is Weekly
+            self.week_day_dropdown.show()
+            self.months_dropdown.hide()
+
     def get_selected_values(self):
-        return self.selected_day, self.selected_time
+        return self.selected_type, self.selected_month, self.selected_month_day, self.selected_week_day, self.selected_time
     
     def accept(self):
-        self.selected_day = self.week_day_dropdown.currentText()
+        self.selected_type = self.schedule_type_dropdown.currentText()
+        self.selected_month = self.months_dropdown.currentIndex() + 1 # Months are 1-12
+        self.selected_month_day = self.month_days_dropdown.currentText()
+        self.selected_week_day = self.week_day_dropdown.currentText()
         self.selected_time = f"{self.hours_dropdown.currentText()}:{self.minutes_dropdown.currentText()}:00"
 
         super().accept()
@@ -987,37 +1041,41 @@ class GitDatBackUI(QWidget):
         # Handle results
         if result == QDialog.DialogCode.Accepted:
             logger.info("Accepted new service settings")
-            day, time = service_dialog.get_selected_values()
-            logger.info(f"Set new schedule: {day}, {time}")
-            self.settings.set_scheduled_day(day)
+            sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
+            logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
+            self.settings.set_schedule_type(sch_type)
+            self.settings.set_scheduled_month(month)
+            self.settings.set_scheduled_month_day(month_day)
+            self.settings.set_scheduled_week_day(week_day)
             self.settings.set_scheduled_time(time)
             self.settings.save_config()
         else:
             logger.info("Cancelled service settings")
 
     def register_background_service(self):
-        day = self.settings.get_scheduled_day()
+        schedule_type = self.settings.get_schedule_type()
+        month_day = self.settings.get_scheduled_month_day()
+        month = self.settings.get_scheduled_month()
+        week_day = self.settings.get_scheduled_week_day()
         time = self.settings.get_scheduled_time()
 
-        if day or time:
-            logger.info(f"Want to register service with custom schedule: {day} - {time}")
-            success, status = systemd.register_service(day=day, time=time)
+        if week_day or time:
+            logger.info(f"Want to register service with custom schedule: {schedule_type} {week_day} - {time}")
+            success, status = systemd.register_service(schedule_type=schedule_type, week_day=week_day, month=month, month_day=month_day, time=time)
         else:
             logger.info(f"Want to register service with default schedule")
-            success, status = systemd.register_service(day=day, time=time)
+            success, status = systemd.register_service()
         if success:
-            self.tell("Command copied to clipboard. Run in Terminal to register.")
             clipboard = self.app.clipboard()
             clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+            AlertDialog("Command copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def unregister_background_service(self):            
         success, status = systemd.unregister_service()
         if success:
-            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
             clipboard = self.app.clipboard()
             clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+            AlertDialog("Command copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def show(self):
         super().show()
