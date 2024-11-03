@@ -806,14 +806,17 @@ class GitDatBackUI(QWidget):
         query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{names_to_remove_joined}"
         qm = QMessageBox
         logger.debug(query)
-        query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No)
+        query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No | qm.Cancel)
         remove_from_disk = False
 
         if query_ans == qm.Yes:
             logger.debug("[remove_selected_entries] MessageBox: Yes")
             remove_from_disk = True
-        else:
+        elif query_ans == qm.No:
             logger.debug("[remove_selected_entries] MessageBox: No")
+        else:
+            logger.debug("[remove_selected_entries] MessageBox: Cancel")
+            return
 
         # Now remove from disk
         persist = []
