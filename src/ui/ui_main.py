@@ -802,7 +802,8 @@ class GitDatBackUI(QWidget):
 
         logger.debug(f"{names_to_remove=}")
 
-        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{'\n'.join(names_to_remove)}"
+        names_to_remove_joined = '\n'.join(names_to_remove)
+        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{names_to_remove_joined}"
         qm = QMessageBox
         logger.debug(query)
         query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No)
