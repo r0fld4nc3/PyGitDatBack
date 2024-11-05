@@ -39,6 +39,10 @@ class Repository(git.Repo):
         
         self.owner, self.name = parse_owner_name_from_url(url)
         # self.head_name = self._get_head()
+        
+        # Weird monkey fix
+        if not hasattr(self, "git_dir"):
+            self.git_dir = None
 
     def clone_from(self, dest: Union[Path, str], *args, **kwargs):
         """`@Override`
@@ -279,12 +283,23 @@ class Repository(git.Repo):
     def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
         logger.debug(f"[{self.name}] shutil.rmtree({to_remove}")
+
+        if not to_remove.exists():
+            logger.info(f"Directory does not exist: {str(to_remove)}")
+            return True
+
         try:
+            if not to_remove.exists():
+                logger.info(f"Directory does not exist: {str(to_remove)}")
+                return True
             shutil.rmtree(to_remove, onerror=_rmtree_on_error) # 3.12 deprecates onerror
         except Exception as e:
             logger.error(f"[{self.name}] {e}", exc_info=1)
             logger.info(f"Python 3.12 deprecated `onerror` and uses `onexc`. Attempting with that...")
             try:
+                if not to_remove.exists():
+                    logger.info(f"Directory does not exist: {str(to_remove)}")
+                    return True
                 shutil.rmtree(to_remove, onexc=_rmtree_on_error) # 3.12 replaced onerror with onexc
             except Exception as e:
                 logger.error(f"[{self.name}] {e}", exc_info=1)
@@ -318,13 +333,24 @@ class Repository(git.Repo):
                 break # Important...
             except Exception as e:
                 attempt += 1
-                logger.warning(f"[{self.name}] Clone attempt {attempt} failed: {e}")
+                no_conn = False
+
+                if "exit code(128)" in e:
+                    no_conn = True
+
+                if no_conn and G_LOG_LEVEL > 0:
+                    logger.info(f"[{self.name}] Clone attempt {attempt} failed: Unable to connect due to exit code(128)")
+                else:
+                    logger.warning(f"[{self.name}] Clone attempt {attempt} failed: {e}")
 
                 if attempt < self.max_retries:
                     logger.info(f"[{self.name}] Waiting {self.retry_delay} seconds before retry...")
                     time.sleep(self.retry_delay)
                 else:
-                    logger.error(f"[{self.name}] All {self.max_retries} attempts failed", exc_info=1)
+                    if no_conn and G_LOG_LEVEL > 0:
+                        logger.info(f"[{self.name}] All {self.max_retries} attempts failed: Unable to connect due to exit code(128)")
+                    else:
+                        logger.error(f"[{self.name}] All {self.max_retries} attempts failed", exc_info=1)
 
         return successful_clone, dest
     
