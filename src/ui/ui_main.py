@@ -49,7 +49,6 @@ class GitDatBackUI(QWidget):
         super().__init__()
 
         self.settings = Settings()
-        self.settings.load_config() # Load the config
 
         window_size = self.settings.get_window_size()
         logger.info(f"{window_size=}")
@@ -82,7 +81,7 @@ class GitDatBackUI(QWidget):
         self.url_input.setPlaceholderText("Enter URL")
         
         # Submit input button
-        self.submit_button = QPushButton("Submit")
+        self.submit_button = QPushButton("Add")
         self.submit_button.clicked.connect(self.add_entry)
 
         # Info Label
@@ -566,7 +565,6 @@ class GitDatBackUI(QWidget):
         repos: list[Repository] = []
 
         settings = Settings()
-        settings.load_config()
         saved_repos = settings.get_repos()
 
         logger.info("Iterating saved repos...")
@@ -678,7 +676,6 @@ class GitDatBackUI(QWidget):
             self.settings.set_scheduled_month_day(month_day)
             self.settings.set_scheduled_week_day(week_day)
             self.settings.set_scheduled_time(time)
-            self.settings.save_config()
         else:
             logger.info("Cancelled service settings")
 

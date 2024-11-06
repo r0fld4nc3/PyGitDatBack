@@ -14,6 +14,12 @@ logger = create_logger("Settings", G_LOG_LEVEL)
 
 
 class Settings:
+    """
+    Singleton-like Settings class for storing and accessing application settings.
+    """
+    _instance = None
+    _loaded = False
+
     KEY_SAVE_TO = "save_to"
     KEY_SERVICE_SET = "background_service_set"
     KEY_SCHEDULED_TYPE = "schedule_type"
@@ -28,23 +34,29 @@ class Settings:
     KEY_WIN_SIZE = "window_size"
     KEY_REPO_LOC = "locations"
 
-    def __init__(self):
-        self.settings = {
-            self.KEY_SAVE_TO: "",
-            self.KEY_SCHEDULED_TYPE: "",
-            self.KEY_SCHEDULED_MONTH: "",
-            self.KEY_SCHEDULED_MONTH_DAY: "",
-            self.KEY_SCHEDULED_WEEK_DAY: "",
-            self.KEY_SCHEDULED_TIME: "",
-            self.KEY_SERVICE_SET: False,
-            self.KEY_REPOS: {},
-            self.KEY_WIN_SIZE: ""
-        }
-        self._config_file_name = "pygitdatback-settings.json"
-        self.config_dir = Path(CONFIG_FOLDER)
-        self.config_file = Path(CONFIG_FOLDER) / self._config_file_name
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(Settings, cls).__new__(cls)
+            cls._instance.settings = {
+            cls.KEY_SAVE_TO: "",
+            cls.KEY_SCHEDULED_TYPE: "",
+            cls.KEY_SCHEDULED_MONTH: "",
+            cls.KEY_SCHEDULED_MONTH_DAY: "",
+            cls.KEY_SCHEDULED_WEEK_DAY: "",
+            cls.KEY_SCHEDULED_TIME: "",
+            cls.KEY_SERVICE_SET: False,
+            cls.KEY_REPOS: {},
+            cls.KEY_WIN_SIZE: ""
+            }
+            cls._instance._config_file_name = "pygitdatback-settings.json"
+            cls._instance.config_dir = Path(CONFIG_FOLDER)
+            cls._instance.config_file = Path(CONFIG_FOLDER) / cls._instance._config_file_name
 
-        logger.info(f"{CONFIG_FOLDER=}")
+            logger.info(f"{CONFIG_FOLDER=}")
+
+            cls._instance.load_config()
+
+        return cls._instance
 
     def set_save_root_dir(self, p: Union[str, Path]):
         self.settings[self.KEY_SAVE_TO] = str(p).replace("\\\\", '/').replace( "\\", '/')
@@ -101,8 +113,6 @@ class Settings:
                 if self.KEY_BRANCHES not in info_section:
                     info_section[self.KEY_BRANCHES] = branches
                 info_section[self.KEY_BRANCHES] = branches
-
-        # self.save_config()
 
     def remove_repo(self, repo_url) -> bool:
         repo_url = str(repo_url).strip()
@@ -221,28 +231,31 @@ class Settings:
         return locations
 
     def load_config(self) -> dict:
-        if self.config_dir == '' or not Path(self.config_dir).exists()\
-                or not Path(self.config_file).exists():
-            logger.debug(f"Config does not exist.")
-            return self.settings
+        if not self._loaded:
+            if self.config_dir == '' or not Path(self.config_dir).exists()\
+                    or not Path(self.config_file).exists():
+                logger.debug(f"Config does not exist.")
+                return self.settings
 
-        self.clean_save_file()
+            self.clean_save_file()
 
-        logger.debug(f"Loading config {self.config_file}")
-        config_error = False
-        with open(self.config_file, 'r', encoding="utf-8") as config_file:
-            try:
-                self.settings = json.load(config_file)
-            except Exception as e:
-                logger.error("An error occurred trying to read config file.")
-                logger.error(e)
-                config_error = True
+            logger.debug(f"Loading config {self.config_file}")
+            config_error = False
+            with open(self.config_file, 'r', encoding="utf-8") as config_file:
+                try:
+                    self.settings = json.load(config_file)
+                except Exception as e:
+                    logger.error("An error occurred trying to read config file.")
+                    logger.error(e)
+                    config_error = True
 
-        if config_error:
-            logger.info("Generating new config file.")
-            with open(self.config_file, 'w', encoding="utf-8") as config_file:
-                config_file.write(json.dumps(self.settings, indent=2))
-        logger.debug(self.settings)
+            if config_error:
+                logger.info("Generating new config file.")
+                with open(self.config_file, 'w', encoding="utf-8") as config_file:
+                    config_file.write(json.dumps(self.settings, indent=2))
+            logger.debug(self.settings)
+
+            self._loaded = True
 
         return self.settings
 

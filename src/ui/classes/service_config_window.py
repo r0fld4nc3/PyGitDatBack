@@ -20,7 +20,6 @@ class ServiceConfigWindow(QDialog):
         self.resize(QSize(300, 200))
 
         self.settings = Settings()
-        self.settings.load_config()
 
         self.selected_type = self.settings.get_schedule_type()
         self.selected_week_day = self.settings.get_scheduled_week_day()
@@ -28,7 +27,7 @@ class ServiceConfigWindow(QDialog):
         self.selected_month = self.settings.get_scheduled_month()
         self.selected_time = self.settings.get_scheduled_time()
         self.selected_hour = self.selected_time.split(':')[0]
-        self.selected_min = self.selected_time.split(':')[1]
+        self.selected_min = self.selected_time.split(':')[1] if len(self.selected_time) > 1 else ''
 
         logger.debug(f"{self.selected_type=}")
         logger.debug(f"{self.selected_time=}")
