@@ -46,7 +46,7 @@ class Repository(git.Repo):
         if not hasattr(self, "git_dir"):
             self.git_dir = None
 
-    def clone_from(self, dest: Union[Path, str], *args, **kwargs):
+    def clone_from(self, dest: Union[Path, str], *args, collect_branches: bool = False, **kwargs):
         """`@Override`
         
         Override method to use to clone the designated GitHub URL to disk.
@@ -100,7 +100,8 @@ class Repository(git.Repo):
             super().__init__(str(clone_dest))
             self.repo = self
 
-        self.collect_branches()
+        if collect_branches:
+            self.collect_branches()
 
         return self
     

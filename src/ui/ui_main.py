@@ -553,7 +553,7 @@ class GitDatBackUI(QWidget):
             self.tell(f"[DRY_RUN] Cloning {len(repos)} repositories")
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry)
+            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry, collect_branches=True)
             logger.debug(f"Task {entry.get_url()}")
 
             # Connect the signals
