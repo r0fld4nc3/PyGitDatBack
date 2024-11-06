@@ -34,28 +34,26 @@ class Settings:
     KEY_WIN_SIZE = "window_size"
     KEY_REPO_LOC = "locations"
 
+    settings = {
+        KEY_SAVE_TO: "",
+        KEY_SCHEDULED_TYPE: "",
+        KEY_SCHEDULED_MONTH: "",
+        KEY_SCHEDULED_MONTH_DAY: "",
+        KEY_SCHEDULED_WEEK_DAY: "",
+        KEY_SCHEDULED_TIME: "",
+        KEY_SERVICE_SET: False,
+        KEY_REPOS: {},
+        KEY_WIN_SIZE: ""
+    }
+    
+    _config_file_name = "pygitdatback-settings.json"
+    config_dir = Path(CONFIG_FOLDER)
+    config_file = Path(CONFIG_FOLDER) / _config_file_name
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(Settings, cls).__new__(cls)
-            cls._instance.settings = {
-            cls.KEY_SAVE_TO: "",
-            cls.KEY_SCHEDULED_TYPE: "",
-            cls.KEY_SCHEDULED_MONTH: "",
-            cls.KEY_SCHEDULED_MONTH_DAY: "",
-            cls.KEY_SCHEDULED_WEEK_DAY: "",
-            cls.KEY_SCHEDULED_TIME: "",
-            cls.KEY_SERVICE_SET: False,
-            cls.KEY_REPOS: {},
-            cls.KEY_WIN_SIZE: ""
-            }
-            cls._instance._config_file_name = "pygitdatback-settings.json"
-            cls._instance.config_dir = Path(CONFIG_FOLDER)
-            cls._instance.config_file = Path(CONFIG_FOLDER) / cls._instance._config_file_name
-
-            logger.info(f"{CONFIG_FOLDER=}")
-
             cls._instance.load_config()
-
         return cls._instance
 
     def set_save_root_dir(self, p: Union[str, Path]):
@@ -231,6 +229,8 @@ class Settings:
         return locations
 
     def load_config(self) -> dict:
+        logger.info(f"{CONFIG_FOLDER=}")
+
         if not self._loaded:
             if self.config_dir == '' or not Path(self.config_dir).exists()\
                     or not Path(self.config_file).exists():
