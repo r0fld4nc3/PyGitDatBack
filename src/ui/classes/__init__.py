@@ -3,6 +3,7 @@ from .worker_signals import WorkerSignals
 from .clone_repo_task import CloneRepoTask
 from .task_queue import TaskQueue
 
-from .table_entry import TableEntry
+from .table_entry_repos import TableRepoEntry
+from .table_branches_view import TableBranchView, TableBranchEntry
 from .alert_dialog import AlertDialog
 from .service_config_window import ServiceConfigWindow

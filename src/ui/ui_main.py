@@ -18,7 +18,7 @@ from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, parse_owner_name_from_url
 import systemd
 
-from .classes import TaskQueue, TableEntry, ServiceConfigWindow, CloneRepoTask, AlertDialog
+from .classes import TaskQueue, TableRepoEntry, TableBranchView, ServiceConfigWindow, CloneRepoTask, AlertDialog
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
@@ -67,7 +67,7 @@ class GitDatBackUI(QWidget):
         self.task_queue = TaskQueue()
 
         # Tracking
-        self.entries: List[TableEntry] = []
+        self.entries: List[TableRepoEntry] = []
 
         # Main layout
         main_layout = QVBoxLayout()
@@ -255,8 +255,8 @@ class GitDatBackUI(QWidget):
 
         self.url_input.clear()
 
-    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "", branches: list = []) -> TableEntry:
-        entry = TableEntry(url)
+    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "", branches: list = []) -> TableRepoEntry:
+        entry = TableRepoEntry(url)
 
         row_pos = self.entry_table.rowCount()
         self.entry_table.insertRow(row_pos)
@@ -332,11 +332,16 @@ class GitDatBackUI(QWidget):
                         entry_item.set_url(new_url)
                         logger.info(f"Edited {entry_url} to {new_url}")
                         self.tell(f"Edited {entry_url} to {new_url}")
-            elif col == clickable_cols[1]:
+            elif col == clickable_cols[1]: # Edit Branches Col
                 item = self.entry_table.item(row, col)
                 entry_item = self.entries[row]
                 entry_url = entry_item.get_url()
                 entry_branches = entry_item.get_branches()
+                
+                branches_dialog = TableBranchView(self, branches=entry_branches)
+                result = branches_dialog.exec()
+
+                return
                 prefilled = ', '.join(entry_branches)
 
                 logger.debug(f"Entry: {entry_item} {entry_branches}")

@@ -32,7 +32,9 @@ class Repository(git.Repo):
         self.repo: git.Repo = None # Will eventually reference self
         self.head_name = ""
         self.repo_branches: list[git.RemoteReference] = list()
+        self.repo_branches_str: list[str] = list()
         self.active_branches: list[git.RemoteReference] = list()
+        self.active_branches_str: list[str] = list()
 
         self.max_retries = 3
         self.retry_delay = 30 # seconds
@@ -98,13 +100,11 @@ class Repository(git.Repo):
             super().__init__(str(clone_dest))
             self.repo = self
 
-        # Don't collect branch names if we're cloning a specific branch already
-        # if not kwargs.get("branch", None):
-            # self.collect_branches()
+        self.collect_branches()
 
         return self
     
-    def clone_branches(self, only_active=False) -> "Repository":
+    def clone_branches(self, only_active=True) -> "Repository":
         if not self.repo_branches or not self.cloned_to or not self.repo:
             return
         
@@ -152,6 +152,8 @@ class Repository(git.Repo):
 
             # self.repo_branches = [head.name.split('/', 1)[-1] for head in self.repo.remote().refs]
             self.repo_branches = [head for head in self.repo.remote().refs]
+            branch_names = [head.name for head in self.repo.heads]
+            logger.debug(f"{branch_names=}")
             logger.debug(f"[{self.name}] Repo branches ({len(self.repo_branches)}): {self.repo_branches}")
 
             # Remove origin/HEAD & main branch/master since we already have it
@@ -181,6 +183,7 @@ class Repository(git.Repo):
             if active:
                 logger.info(f"[{self.name}] {branch.name} is active")
                 self.active_branches.append(branch)
+                self.active_branches_str.append(branch.name.replace("origin/", ''))
 
         logger.info(f"[{self.name}] {len(self.active_branches)} active branches: {', '.join([b.name for b in self.active_branches])}")
 

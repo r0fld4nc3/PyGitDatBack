@@ -2,6 +2,7 @@ from PySide6.QtCore import QRunnable
 from time import sleep
 import secrets
 
+from .table_entry_repos import TableRepoEntry
 from .worker_signals import WorkerSignals
 from conf_globals import G_LOG_LEVEL, DRY_RUN
 from log import create_logger
@@ -13,7 +14,7 @@ class CloneRepoTask(QRunnable):
         super().__init__()
         self.repo = repo
         self.path = path
-        self.entry = entry
+        self.entry: TableRepoEntry = entry
         self.signals = WorkerSignals()
 
     def run(self):
@@ -21,6 +22,7 @@ class CloneRepoTask(QRunnable):
             if not DRY_RUN:
                 logger.info(f"Cloning repository {self.repo.url} into {self.path}")
                 self.repo.clone_from(self.path)
+                self.entry.set_branches(self.repo.active_branches_str)
             else:
                 logger.info(f"Dry run repository {self.repo.url} into {self.path}")
                 

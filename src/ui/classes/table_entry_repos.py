@@ -11,7 +11,7 @@ from . import AlignedWidget
 logger = create_logger(__name__, G_LOG_LEVEL)
 
 
-class TableEntry(QWidget):
+class TableRepoEntry(QWidget):
     def __init__(self, url: str):
         super().__init__()
 
@@ -64,7 +64,7 @@ class TableEntry(QWidget):
     def get_url(self) -> str:
         return self.url_label.text()
 
-    def set_url(self, url):
+    def set_url(self, url: str):
         former_url = self.url_label.text()
         self.url_label.setText(url)
         logger.info(f"Set new URL: {url} for former {former_url}")
