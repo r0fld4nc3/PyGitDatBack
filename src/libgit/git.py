@@ -90,37 +90,13 @@ class Repository(git.Repo):
         # =================================
         #             CLONING
         # =================================
+        successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
 
-        # If directory exists and is a cloned repo already, rename existing to avoid conflict
-        if clone_dest.exists():
-            logger.debug(f"[{self.name}] Destination exists: {clone_dest}")
-            
+        if successful_clone:
             self.cloned_to = clone_dest
-            backup_dir = self.set_backup_dir(clone_dest)
-            
-            # Clone the repo/branch
-            successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
-            
-            # Try to remove the backup directory after successful clone
-            if successful_clone:
-                logger.info(f"[{self.name}] Deleting {backup_dir.name} after successful clone.")
-                self.__remove_dir(backup_dir)
-            else:
-                logger.warning(f"[{self.name}] Cloning was unsuccesful. Attempting to revert state.")
-                # Remove the possible lingering destination directory
-                if clone_dest.exists():
-                    self.__remove_dir(clone_dest)
-                
-                # Set backup dir back
-                backup_dir.rename(clone_dest)
-        else:
-            successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
-
-            if successful_clone:
-                self.cloned_to = clone_dest
-                # Now initialise the base class
-                super().__init__(str(clone_dest))
-                self.repo = self
+            # Now initialise the base class
+            super().__init__(str(clone_dest))
+            self.repo = self
 
         # Don't collect branch names if we're cloning a specific branch already
         # if not kwargs.get("branch", None):
@@ -307,30 +283,38 @@ class Repository(git.Repo):
 
         return True
 
-    def __clone_from_basecls(self, url, dest, *args, **kwargs) -> Tuple[bool, Path]:
+    def __clone_from_basecls(self, url, dest: Path, *args, **kwargs) -> Tuple[bool, Path]:
         attempt = 0
         successful_clone = False
 
-        # Configure longer timeouts
-        git_options = {
-            'git_options': {
-                '-c': [
-                    'http.lowSpeedLimit=1000',
-                    'http.lowSpeedTime=60',
-                    'http.postBuffer=524288000',
-                    'http.timeout=300'
-                ]
-            }
-        }
-        # kwargs.update(git_options)
+        if not isinstance(dest, Path):
+            dest = Path(dest)
+
+        logger.debug(f"{dest=}")
 
         while attempt < self.max_retries:
             try:
-                logger.info(f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
-                self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
-                successful_clone = True
-                logger.info(f"[{self.name}] Successful clone. Breaking attempt loop.")
-                break # Important...
+                # Destination exists, means we likely have a git repo
+                if dest.exists():
+                    logger.info(f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Updating Repository: {str(dest)}")
+                    self.repo = git.Repo(str(dest))
+                    
+                    origin = self.repo.remotes.origin
+                    logger.info(f"[{self.name}] Fetching origin...")
+                    origin.fetch()
+                    
+                    logger.info(f"[{self.name}] Calling `origin.pull()`")
+                    origin.pull()
+                    
+                    successful_clone = True
+                    logger.info(f"[{self.name}] Successful update. Breaking attempt loop.")
+                    break # Important...
+                else:
+                    logger.info(f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`")
+                    self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
+                    successful_clone = True
+                    logger.info(f"[{self.name}] Successful clone. Breaking attempt loop.")
+                    break # Important...
             except Exception as e:
                 attempt += 1
                 no_conn = False
