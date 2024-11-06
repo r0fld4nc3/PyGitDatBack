@@ -189,7 +189,7 @@ class Settings:
         logger.info(f"Set locations for repository {url}")
 
         if not isinstance(locations, list):
-            locations = [locations]
+            locations = [str(locations)]
         
         repo = self.settings[self.KEY_REPOS].get(url)
 
@@ -202,7 +202,7 @@ class Settings:
         # Extend avoid duplicates
         repo_locations.extend([str(loc) for loc in locations if str(loc) not in repo_locations])
 
-        self.settings[self.KEY_REPOS][url][self.KEY_REPO_LOC] = locations
+        self.settings[self.KEY_REPOS][url][self.KEY_REPO_LOC] = repo_locations
 
         logger.info(f"New repository locations: {repo_locations}")
 
