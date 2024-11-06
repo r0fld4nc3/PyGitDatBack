@@ -2,31 +2,25 @@ import sys
 from pathlib import Path
 from typing import List
 import shutil
-from queue import Queue
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from time import sleep
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QCheckBox, QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, 
-    QFileDialog, QDialogButtonBox, QTextEdit, QComboBox, QMessageBox
+    QLabel, QTableWidget, QSizePolicy, QInputDialog, QDialog, QFileDialog, 
+    QMessageBox
 )
-from PySide6.QtCore import QSize, QDateTime, Qt, QRunnable, QThread, QThreadPool, QObject, Signal
+from PySide6.QtCore import QSize, QDateTime, QRunnable
 
 from .utils import get_screen_info
-from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS
+from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS, DRY_RUN
 from log import create_logger
 from settings import Settings
 from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, parse_owner_name_from_url
 import systemd
 
+from .classes import TaskQueue, TableEntry, ServiceConfigWindow, CloneRepoTask, AlertDialog
+
 logger = create_logger(__name__, G_LOG_LEVEL)
-
-
-class WorkerSignals(QObject):
-    finished = Signal(str)
-    error = Signal(str, str)
 
 
 class BranchTask(QRunnable):
@@ -41,350 +35,6 @@ class BranchTask(QRunnable):
             self.callback(result)
         except Exception as e:
             logger.error(f"Error obtaining branches and commits for repository {self.url}: {e}")
-
-class CloneRepoTask(QRunnable):
-    def __init__(self, repo, path, entry):
-        super().__init__()
-        self.repo = repo
-        self.path = path
-        self.entry = entry
-        self.signals = WorkerSignals()
-
-    def run(self):
-        try:
-            logger.info(f"Cloning repository {self.repo.url} into {self.path}")
-            self.repo.clone_from(self.path)
-            self.signals.finished.emit(self.repo.url)
-        except Exception as e:
-            logger.error(f"Error cloning repository {self.repo.url}: {e}")
-            self.signals.error.emit(self.repo.url, str(e))
-
-
-class TaskQueue(QObject):
-    _task_lock = threading.Lock()
-    _ongoing_tasks: int = 0
-    MAX_CONCURRENT_TASKS: int = MAX_CONCURRENT_TASKS
-
-    def __init__(self):
-        super().__init__()
-        self.queue = Queue()
-        self.thread_pool = QThreadPool()
-        self.is_running = True
-        
-        self.worker_thread = QThread()
-        self.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.process_tasks)
-        self.worker_thread.start()
-
-    @classmethod
-    def get_ongoing_tasks(cls) -> int:
-        with cls._task_lock:
-            return cls._ongoing_tasks
-        
-    @classmethod
-    def increment_ongoing_tasks(cls) -> bool:
-        with cls._task_lock:
-            if cls._ongoing_tasks < cls.MAX_CONCURRENT_TASKS:
-                cls._ongoing_tasks += 1
-                return True
-            return False
-        
-    @classmethod
-    def decrement_ongoing_tasks(cls):
-        with cls._task_lock:
-            if cls._ongoing_tasks > 0:
-                cls._ongoing_tasks -= 1
-
-    def add_task(self, task: QRunnable | CloneRepoTask):
-        self.queue.put(task)
-        logger.debug(f"Put task: {task.entry.get_url()}")
-
-    def process_tasks(self):
-        while self.is_running:
-            if self.queue.qsize() == 0:
-                sleep(1) # Prevent busy waiting
-                continue
-
-            try:
-                # Peek without taking
-                task = self.queue.queue[0]
-
-                # Try to increment the task counter
-                if self.increment_ongoing_tasks():
-                    task = self.queue.get(timeout=1)
-                    logger.info(f"Got task {task.entry.get_url()}! Ongoing: {self.get_ongoing_tasks()}")
-
-                    # Wrap run method to handle completion
-                    original_run = task.run
-                    def wrapped_run():
-                        try:
-                            original_run()
-                        except Exception as e:
-                            logger.error(f"Error in wrapped run: {e}")
-                        finally:
-                            self.decrement_ongoing_tasks()
-                            logger.debug(f"Task completed. Remaining active tasks: {self.get_ongoing_tasks()}")
-
-                    task.run = wrapped_run
-
-                    # Start the task
-                    self.thread_pool.start(task)
-                    self.queue.task_done()
-                else:
-                    # If we can't process now, wait before trying again
-                    logger.debug(f"Max concurrent tasks reached ({self.MAX_CONCURRENT_TASKS}). Tasks in queue: {self.queue.qsize()}")
-                    sleep(1)
-                continue
-            except Exception as e:
-                logger.error(f"Error processing task: {e}")
-                self.decrement_ongoing_tasks()
-
-    def stop(self):
-        logger.info("Stopping Task Queue")
-        self.is_running = False
-        self.worker_thread.quit()
-        self.worker_thread.wait()
-
-    def cleanup(self):
-        self.stop()
-
-    @classmethod
-    def reset_task_counter(cls):
-        with cls._task_lock:
-            cls._ongoing_tasks = 0
-
-
-class AlignedWidget(QWidget):
-    def __init__(self, widget, alignment=Qt.AlignCenter, margins: tuple =None):
-        super().__init__()
-
-        if not margins:
-            margins = (0, 0, 0, 0)
-
-        if len(margins) != 4:
-            raise ValueError(f"Expected `margins` to have 4 elements, but got {len(margins)}: {margins}")
-        
-        # logger.debug(f"{margins=} ({widget})")
-
-        self.main_widget = widget
-        layout = QHBoxLayout()
-        layout.addWidget(self.main_widget, alignment=alignment)
-        layout.setContentsMargins(*margins)
-        
-        if isinstance(widget, QLabel):
-            self.main_widget.setStyleSheet(f"padding-left: {margins[0]}px; padding-top: {margins[1]}px; padding-right: {margins[2]}px; padding-bottom: {margins[3]}px;")
-
-        self.setLayout(layout)
-
-
-class ServiceConfigWindow(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        self.setWindowTitle("Service Settings")
-        self.setModal(True) # Blocks interaction with parent window
-        self.resize(QSize(300, 200))
-
-        self.settings = Settings()
-        self.settings.load_config()
-
-        self.selected_day = self.settings.get_scheduled_day()
-        self.selected_time = self.settings.get_scheduled_time()
-        self.selected_hour = self.selected_time.split(':')[0]
-        self.selected_min = self.selected_time.split(':')[1]
-
-        logger.debug(f"{self.selected_time=}")
-        logger.debug(f"{self.selected_hour=}")
-        logger.debug(f"{self.selected_min=}")
-
-        main_layout = QVBoxLayout()
-
-        service_date_widgets_layout = QHBoxLayout()
-        
-        # Schedule Widget
-        date_widgets_label = QLabel("Schedule:")
-        
-        # Week Days Combobox
-        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        self.week_day_dropdown = QComboBox()
-        self.week_day_dropdown.addItems(days)
-        if self.selected_day in days:
-            self.week_day_dropdown.setCurrentText(self.selected_day)
-
-        # Time Possibilities Combobox
-        times = self.__generate_hours_minutes()
-        self.hours_dropdown = QComboBox()
-        self.hours_dropdown.setContentsMargins(0, 0, 0, 0)
-        self.minutes_dropdown = QComboBox()
-        self.hours_dropdown.addItems(times[0])
-        self.minutes_dropdown.addItems(times[1])
-        if self.selected_hour in times[0]:
-            self.hours_dropdown.setCurrentText(self.selected_hour)
-        if self.selected_min in times[1]:
-            self.minutes_dropdown.setCurrentText(self.selected_min)
-
-        hour_sep = QLabel(":")
-        hour_sep.setContentsMargins(0, 0, 0, 0)
-
-        # Accept button
-        ok_button = QPushButton("Accept")
-        ok_button.clicked.connect(self.accept)
-
-        # Add to service date layout
-        service_date_widgets_layout.addStretch()
-        service_date_widgets_layout.addWidget(date_widgets_label)
-        service_date_widgets_layout.addWidget(self.week_day_dropdown)
-        service_date_widgets_layout.addWidget(self.hours_dropdown)
-        service_date_widgets_layout.addWidget(hour_sep)
-        service_date_widgets_layout.addWidget(self.minutes_dropdown)
-        service_date_widgets_layout.addStretch()
-        
-        # Add to main layout
-        main_layout.addLayout(service_date_widgets_layout)
-        main_layout.addWidget(ok_button)
-
-        self.setLayout(main_layout)
-
-    def get_selected_values(self):
-        return self.selected_day, self.selected_time
-    
-    def accept(self):
-        self.selected_day = self.week_day_dropdown.currentText()
-        self.selected_time = f"{self.hours_dropdown.currentText()}:{self.minutes_dropdown.currentText()}:00"
-
-        super().accept()
-    
-    def __generate_hours_minutes(self) -> list[list]:
-        hours = []
-        minutes = []
-
-        # Generate hours from 0-24
-        for hour in range(24):
-            hour_str = f"{hour:02d}"
-            hours.append(hour_str)
-
-        # Generate minutes from 1-60 in 5 minute intervals
-        for minute in range(0, 60, 5):
-            minute_str = f"{minute:02d}"
-            minutes.append(minute_str)
-
-        return [hours, minutes]
-
-
-class AlertDialog(QDialog):
-    def __init__(self, alert: str, title: str="Alert"):
-        super().__init__()
-
-        self.alert_text = alert
-        self.title = title
-
-        self.setWindowTitle(title)
-
-        self.resize(QSize(400, 200))
-
-        QBtn = (
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-
-        self.button_box = QDialogButtonBox(QBtn)
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-
-        layout = QVBoxLayout()
-        
-        self.message_box = QTextEdit(self.alert_text)
-        self.message_box.setEnabled(False)
-        self.message_box.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self.message_box)
-        layout.addWidget(self.button_box)
-        self.setLayout(layout)
-
-        self.exec()
-
-
-class TableEntry(QWidget):
-    def __init__(self, url: str):
-        super().__init__()
-
-        self.pull_checkbox = QCheckBox()
-        self.pull_checkbox_widget = AlignedWidget(self.pull_checkbox)
-        self.pull_checkbox.setChecked(True) # Default pull to true
-
-        self.branches_to_pull = []
-        
-        self.url_label = QLabel(url.strip())
-        self.url_label_widget = AlignedWidget(self.url_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
-
-        self.branches_label = QLabel()
-        self.branches_label_widget = AlignedWidget(self.branches_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
-        
-        self.timestamp_label = QLabel("n/a")
-        self.timestamp_widget = AlignedWidget(self.timestamp_label)
-
-        layout = QHBoxLayout()
-        layout.addWidget(self.pull_checkbox_widget)
-        layout.addWidget(self.url_label)
-        layout.addWidget(self.timestamp_widget)
-
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        self.setLayout(layout)
-
-    def get_pull(self) -> bool:
-        return self.pull_checkbox.isChecked()
-
-    def set_pull(self, state: bool):
-        self.pull_checkbox.setChecked(state)
-
-    def get_timestamp(self) -> str:
-        return self.timestamp_label.text()
-
-    def set_timestamp_now(self):
-        """Sets the current timestamp on the timestamp_item."""
-        _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        self.timestamp_label.setText(_timestamp)
-        logger.info(f"Set timestamp {_timestamp} of entry {self.get_url()}")
-
-    def get_url(self) -> str:
-        return self.url_label.text()
-
-    def set_url(self, url):
-        former_url = self.url_label.text()
-        self.url_label.setText(url)
-        logger.info(f"Set new URL: {url} for former {former_url}")
-
-    def set_timestamp(self, timestamp: str):
-        """Sets the timestamp on the timestamp_item."""
-        self.timestamp_label.setText(timestamp)
-        logger.info(f"Set timestamp {timestamp} of widget {self.timestamp_label}")
-
-    def get_branches(self) -> list:
-        return self.branches_to_pull
-
-    def set_branches(self, branches_to_set: list):
-        self.branches_to_pull = branches_to_set
-        self.branches_label.setText(', '.join(self.branches_to_pull))
-        logger.info(f"Set new branches: {self.branches_to_pull} for {self.url_label.text()}")
-
-    def props(self) -> dict:
-        """Returns the properties that comprise the entry for a saveable format
-
-        * `do_pull` Checked state of the checkbox. `True` if checkbox is checked, `False` otherwise
-        * `branches` List of branches to pull from repository
-        * `url` URL string
-        * `ts` Timestamp string
-        """
-
-        ret = {
-            "do_pull": self.get_pull(),
-            "branches": self.get_branches(),
-            "url": self.get_url(),
-            "ts": self.get_timestamp()
-        }
-
-        return ret
 
 
 class GitDatBackUI(QWidget):
@@ -439,8 +89,8 @@ class GitDatBackUI(QWidget):
         self.info_label = QLabel()
         
         # Main Table
-        self.entry_table = QTableWidget(0, 4)
-        self.entry_table.setHorizontalHeaderLabels(["Pull", "URL", "Branches", "Last Pulled"])
+        self.entry_table = QTableWidget(0, 5)
+        self.entry_table.setHorizontalHeaderLabels(["Pull", "URL", "Branches", "Last Pulled", "Status"])
         self.entry_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.entry_table.cellDoubleClicked.connect(self.handle_cell_doubleclick)
         self.entry_table.horizontalHeader().setStretchLastSection(True)
@@ -448,6 +98,7 @@ class GitDatBackUI(QWidget):
         self.entry_table.setColumnWidth(1, 400)
         self.entry_table.setColumnWidth(2, 150)
         self.entry_table.setColumnWidth(3, 175)
+        self.entry_table.setColumnWidth(4, 100)
         # Selection behaviour
         self.entry_table.setSelectionBehavior(QTableWidget.SelectRows) # Select full rows
 
@@ -615,6 +266,7 @@ class GitDatBackUI(QWidget):
         self.entry_table.setCellWidget(row_pos, 1, entry.url_label)
         self.entry_table.setCellWidget(row_pos, 2, entry.branches_label_widget)
         self.entry_table.setCellWidget(row_pos, 3, entry.timestamp_widget)
+        self.entry_table.setCellWidget(row_pos, 4, entry.status_widget)
 
         # Handle pull checkbox
         entry.set_pull(do_pull)
@@ -752,14 +404,17 @@ class GitDatBackUI(QWidget):
         query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{names_to_remove_joined}"
         qm = QMessageBox
         logger.debug(query)
-        query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No)
+        query_ans = qm.question(self, 'Remove from Disk?', query, qm.Yes | qm.No | qm.Cancel)
         remove_from_disk = False
 
         if query_ans == qm.Yes:
             logger.debug("[remove_selected_entries] MessageBox: Yes")
             remove_from_disk = True
-        else:
+        elif query_ans == qm.No:
             logger.debug("[remove_selected_entries] MessageBox: No")
+        else:
+            logger.debug("[remove_selected_entries] MessageBox: Cancel")
+            return
 
         # Now remove from disk
         persist = []
@@ -882,11 +537,16 @@ class GitDatBackUI(QWidget):
             
             if is_checked:
                 repos.append((Repository(url), entry))
-                entry.set_timestamp("Fetching...")
+                entry.set_status(entry.status_fetching)
 
         if not repos:
             self.tell("Nothing is checked.")
             return
+        
+        if not DRY_RUN:
+            self.tell(f"Cloning {len(repos)} repositories")
+        else:
+            self.tell(f"[DRY_RUN] Cloning {len(repos)} repositories")
 
         for repo, entry in repos:
             clone_task = CloneRepoTask(repo, self.repos_backup_path, entry)
@@ -898,7 +558,7 @@ class GitDatBackUI(QWidget):
 
             self.task_queue.add_task(clone_task)
 
-        self.set_buttons_state_while_task(True)
+        # self.set_buttons_state_while_task(True)
 
     @staticmethod
     def pull_repos_no_ui():
@@ -949,6 +609,7 @@ class GitDatBackUI(QWidget):
         button_widget.setEnabled(state)
 
     def set_buttons_state_while_task(self, state: bool):
+        logger.info(f"Set buttons state {state}")
         self.set_button_state(self.submit_button, state)
         self.set_button_state(self.set_selection_selected_button, state)
         self.set_button_state(self.set_selection_deselected_button, state)
@@ -964,22 +625,44 @@ class GitDatBackUI(QWidget):
     def on_clone_success(self, repo_url):
         logger.info(f"Cloning completed for: {repo_url}")
 
-        for entry in self.entries:  
-            if entry.url_label.text() == repo_url:
+        for entry in self.iter_entries():
+            if entry.get_url() == repo_url:
                 entry.set_timestamp_now()
+                entry.set_status(entry.status_finished)
 
         # Add to repo locations
         self.settings.add_repo_locations(repo_url, self.repos_backup_path)
 
-        self.tell(f"Cloning completed for: {repo_url}")
+        # Check if all done
+        if self.check_if_all_completed():
+            self.tell("Cloning completed")
+            self.set_buttons_state_while_task(True)
                 
     def on_clone_error(self, repo_name, error_msg):
-        logger.error(f"Error cloning repository {repo_name}: {error_msg}")
+        # logger.error(f"Error cloning repository {repo_name}: {error_msg}")
         self.tell(f"Error cloning {repo_name}: {error_msg}")
 
-        for entry in self.entries:  
+        for entry in self.iter_entries():  
             if entry.url_label.text() == repo_name:
-                entry.set_timestamp("Error")
+                entry.set_status(f"Error: {error_msg}")
+
+        # Check if all done
+        if self.check_if_all_completed():
+            self.tell("Cloning completed")
+            self.set_buttons_state_while_task(True)
+        
+
+    def check_if_all_completed(self):
+        missing = False
+        for entry in self.iter_entries():
+            if entry.get_pull() and entry.status_fetching.lower() in entry.get_status().lower():
+                missing = True
+                break
+
+        if not missing:
+            return True
+
+        return False
 
     def show_service_options_dialog(self):
         service_dialog = ServiceConfigWindow(self)
@@ -988,37 +671,41 @@ class GitDatBackUI(QWidget):
         # Handle results
         if result == QDialog.DialogCode.Accepted:
             logger.info("Accepted new service settings")
-            day, time = service_dialog.get_selected_values()
-            logger.info(f"Set new schedule: {day}, {time}")
-            self.settings.set_scheduled_day(day)
+            sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
+            logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
+            self.settings.set_schedule_type(sch_type)
+            self.settings.set_scheduled_month(month)
+            self.settings.set_scheduled_month_day(month_day)
+            self.settings.set_scheduled_week_day(week_day)
             self.settings.set_scheduled_time(time)
             self.settings.save_config()
         else:
             logger.info("Cancelled service settings")
 
     def register_background_service(self):
-        day = self.settings.get_scheduled_day()
+        schedule_type = self.settings.get_schedule_type()
+        month_day = self.settings.get_scheduled_month_day()
+        month = self.settings.get_scheduled_month()
+        week_day = self.settings.get_scheduled_week_day()
         time = self.settings.get_scheduled_time()
 
-        if day or time:
-            logger.info(f"Want to register service with custom schedule: {day} - {time}")
-            success, status = systemd.register_service(day=day, time=time)
+        if week_day or time:
+            logger.info(f"Want to register service with custom schedule: {schedule_type} {week_day} - {time}")
+            success, status = systemd.register_service(schedule_type=schedule_type, week_day=week_day, month=month, month_day=month_day, time=time)
         else:
             logger.info(f"Want to register service with default schedule")
-            success, status = systemd.register_service(day=day, time=time)
+            success, status = systemd.register_service()
         if success:
-            self.tell("Command copied to clipboard. Run in Terminal to register.")
             clipboard = self.app.clipboard()
             clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+            AlertDialog("Command copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def unregister_background_service(self):            
         success, status = systemd.unregister_service()
         if success:
-            self.tell("Command copied to clipboard. Run in Terminal to unregister.")
             clipboard = self.app.clipboard()
             clipboard.setText(status)
-            AlertDialog("Some code has been copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
+            AlertDialog("Command copied to the clipboard. Please run it in your preferred Terminal application.", title="Set Background Service")
 
     def show(self):
         super().show()

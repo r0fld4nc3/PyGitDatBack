@@ -1,7 +1,8 @@
 G_LOG_LEVEL = 0
-VERSION: tuple = (0, 0, 14)
+VERSION: tuple = (0, 0, 15)
 HOST: str = "r0fld4nc3"
 APP_NAME: str = "PyGitDatBack"
 COMMIT_CUTOFF_DAYS = 360
 THREAD_TIMEOUT_SECONDS = 60
 MAX_CONCURRENT_TASKS = 3
+DRY_RUN = False

@@ -2,7 +2,7 @@
 Description=Run PyGitDatBack No-UI Service Weekly
 
 [Timer]
-OnCalendar={{DAY_VAR}} *-*-* {{TIME_VAR}}
+OnCalendar={{SCHEDULE}}
 Persistent=true
 RandomizeDelaySec=60
 
