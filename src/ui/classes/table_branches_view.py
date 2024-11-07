@@ -55,7 +55,7 @@ class TableBranchView(QDialog):
 
         self.setWindowTitle("Branches")
         self.setModal(True) # Blocks interaction with parent window
-        size_add = len(branches) * 10 if len(branches) >= 15 else 0
+        size_add = len(branches) * 15 if len(branches) >= 5 else 0
         if size_add > 1000:
             size_add = 1000
         logger.debug(f"{size_add=}")

@@ -23,7 +23,7 @@ API_EXT_GITHUB_BRANCHES = "branches"
 
 
 class Repository(git.Repo):
-    def __init__(self, url):
+    def __init__(self, url, destination_root: Path =None):
         # super().__init__(*args, **kwargs)
         self.url: str  = url
         self.name: str  = ""
@@ -41,6 +41,10 @@ class Repository(git.Repo):
         
         self.owner, self.name = parse_owner_name_from_url(url)
         # self.head_name = self._get_head()
+
+        # Add path and repo if destination dir and exists
+        if destination_root:
+            self.set_git_repo(destination_root)
         
         # Weird monkey fix
         if not hasattr(self, "git_dir"):
@@ -166,6 +170,7 @@ class Repository(git.Repo):
                     except ValueError:
                         logger.info(f"{branch.name} not in branches")
             
+            self.repo_branches_str = [branch.name.replace("origin/", '') for branch in self.repo_branches]
             logger.info(f"[{self.name}] {len(self.repo_branches)} branches for Repository {self.name}: {self.repo_branches}")
 
             self.collect_active_branches()
@@ -259,6 +264,17 @@ class Repository(git.Repo):
                 self.__remove_dir(dir_path) # Remove the clone destination. Avoid fatal error
         
         return backup_dir
+    
+    def set_git_repo(self, destination: Path):
+        if not isinstance(destination, Path):
+            destination = Path(destination)
+
+        # Add path and repo if destination dir and exists
+        if destination and destination.exists():
+            repo_dir = destination / self.name
+            if repo_dir.exists():
+                self.cloned_to = repo_dir
+                self.repo = git.Repo(str(self.cloned_to))
 
     def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
@@ -301,7 +317,8 @@ class Repository(git.Repo):
                 # Destination exists, means we likely have a git repo
                 if dest.exists():
                     logger.info(f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Updating Repository: {str(dest)}")
-                    self.repo = git.Repo(str(dest))
+                    if not self.repo:
+                        self.repo = git.Repo(str(dest))
                     
                     origin = self.repo.remotes.origin
                     logger.info(f"[{self.name}] Fetching origin...")
