@@ -101,16 +101,10 @@ class Settings:
             if timestamp:
                 self.settings[self.KEY_REPOS][repo_url][self.KEY_LAST_PULLED] = timestamp
 
-            if branches:
-                # Technically empty?
-                if len(branches) == 1:
-                    if not branches[0]: # Empty entry
-                        branches.clear()
-
-                info_section = self.settings[self.KEY_REPOS][repo_url]
-                if self.KEY_BRANCHES not in info_section:
-                    info_section[self.KEY_BRANCHES] = branches
+            info_section = self.settings[self.KEY_REPOS][repo_url]
+            if self.KEY_BRANCHES not in info_section:
                 info_section[self.KEY_BRANCHES] = branches
+            info_section[self.KEY_BRANCHES] = branches
 
     def remove_repo(self, repo_url) -> bool:
         repo_url = str(repo_url).strip()
