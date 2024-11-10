@@ -10,7 +10,7 @@ from . import AlignedWidget
 
 logger = create_logger(__name__, G_LOG_LEVEL)
 
-
+# TODO: Select All, Deselect All, Select Selected, Deselect Selected buttons
 class TableBranchEntry(QWidget):
     def __init__(self, branch_name: str):
         super().__init__()
@@ -101,9 +101,19 @@ class TableBranchView(QDialog):
         logger.info(f"Added entry: {branch_name}")
 
         return entry
+    
+    def set_selected_values(self, branch_names: list):
+        for entry in self.entries:
+            branch_name = entry.get_name()
+            if branch_name in branch_names:
+                logger.debug(f"Set {branch_name}: True")
+                entry.set_pull(True)
+            else:
+                logger.debug(f"Set {branch_name}: False")
+                entry.set_pull(False)
 
-    def get_selected_values(self):
-        return
+    def get_selected_values(self) -> list:
+        return [entry.get_name() for entry in self.entries if entry.get_pull()]
     
     def accept(self):
         super().accept()

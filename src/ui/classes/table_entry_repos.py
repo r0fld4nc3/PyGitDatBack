@@ -24,7 +24,7 @@ class TableRepoEntry(QWidget):
         self.url_label = QLabel(url.strip())
         self.url_label_widget = AlignedWidget(self.url_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
 
-        self.branches_label = QLabel()
+        self.branches_label = QLabel('0')
         self.branches_label_widget = AlignedWidget(self.branches_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
         
         self.timestamp_label = QLabel("n/a")
@@ -90,8 +90,13 @@ class TableRepoEntry(QWidget):
 
     def set_branches(self, branches_to_set: list):
         self.branches_to_pull = branches_to_set
-        self.branches_label.setText(', '.join(self.branches_to_pull))
+        # self.branches_label.setText(', '.join(self.branches_to_pull))
+        self.branches_label.setText(str(len(self.branches_to_pull)))
         logger.info(f"Set new branches: {self.branches_to_pull} for {self.url_label.text()}")
+
+    def set_branches_label_text(self, text: str):
+        self.branches_label.setText(str(text))
+        logger.info(f"Set Branches Label text: {str(text)}")
 
     def props(self) -> dict:
         """Returns the properties that comprise the entry for a saveable format

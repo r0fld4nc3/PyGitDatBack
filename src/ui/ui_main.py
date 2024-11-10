@@ -68,6 +68,7 @@ class GitDatBackUI(QWidget):
 
         # Tracking
         self.entries: List[TableRepoEntry] = []
+        self.repos: List[Repository] = []
 
         # Main layout
         main_layout = QVBoxLayout()
@@ -257,6 +258,7 @@ class GitDatBackUI(QWidget):
 
     def add_to_table(self, url: str, do_pull: bool, timestamp: str = "", branches: list = []) -> TableRepoEntry:
         entry = TableRepoEntry(url)
+        repo = Repository(url, destination_root=self.settings.get_save_root_dir())
 
         row_pos = self.entry_table.rowCount()
         self.entry_table.insertRow(row_pos)
@@ -277,8 +279,12 @@ class GitDatBackUI(QWidget):
         # Handle branches
         if branches:
             entry.set_branches(branches)
+            entry.set_branches_label_text(f"{len(entry.get_branches())} ({len(repo.active_branches_str)})")
+        else:
+            entry.set_branches_label_text(f"0 ({len(repo.active_branches_str)})")
 
         self.entries.append(entry)
+        self.repos.append(repo)
 
         logger.info(f"Added entry: {url}")
         self.tell(f"Added entry: {url}")
@@ -334,41 +340,50 @@ class GitDatBackUI(QWidget):
                         self.tell(f"Edited {entry_url} to {new_url}")
             elif col == clickable_cols[1]: # Edit Branches Col
                 item = self.entry_table.item(row, col)
-                entry_item = self.entries[row]
+                entry_item: TableRepoEntry = self.entries[row]
                 entry_url = entry_item.get_url()
-                entry_branches = entry_item.get_branches()
                 
-                branches_dialog = TableBranchView(self, branches=entry_branches)
-                result = branches_dialog.exec()
+                # Collect active branches and update list
+                entry_repo: Repository = self.repos[row]
+                all_active_branches = entry_repo.active_branches_str
+                logger.debug(f"{all_active_branches=}")
+                
+                branches_dialog = TableBranchView(self, branches=all_active_branches)
+                selected_branches = entry_item.get_branches()
+                logger.debug(f"{selected_branches=}")
+                branches_dialog.set_selected_values(selected_branches)
+                
+                branches_dialog.exec()
 
-                return
-                prefilled = ', '.join(entry_branches)
-
-                logger.debug(f"Entry: {entry_item} {entry_branches}")
-                logger.debug(f"{prefilled=}")
-
-                input_dialog = QInputDialog(self)
-                input_dialog.setWindowTitle("Edit Branches")
-                input_dialog.setLabelText("Branches (comma separated)")
-                input_dialog.setTextValue(prefilled)
-                input_dialog.resize(400, 200)
-
-                if input_dialog.exec_() == QDialog.Accepted:
-                    branches = [b.strip() for b in input_dialog.textValue().split(',')]
-                    entry_item.set_branches(branches)
-                    logger.info(f"Updated branches of {entry_url}: {branches}")
-                    self.tell(f"Updated branches of {entry_url.split('/')[-1]}: {branches}")
+                # Set the ones that were active
+                entry_item.set_branches(branches_dialog.get_selected_values())
+                entry_item.set_branches_label_text(f"{len(entry_item.get_branches())} ({len(entry_repo.active_branches_str)})")
+                logger.debug(f"{entry_item.get_branches()=}")
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
         for entry in self.entries:
             yield entry
 
+    def iter_repos(self):
+        """Yield existing Repository objects."""
+        for repo in self.repos:
+            yield repo
+
     def entry_exists(self, url: str) -> bool:
         for entry_widget in self.iter_entries():
             logger.debug(f"{entry_widget=}")
             if entry_widget.url_label.text() == url:
                 logger.info(f"{url} already in list of entries.")
+                return True
+        
+        return False
+    
+    def repo_exists(self, url: str) -> bool:
+        for repo in self.iter_repos():
+            logger.debug(f"{repo=}")
+            if repo.url == url:
+                logger.info(f"Repo {url} already exists.")
                 return True
         
         return False
@@ -387,6 +402,7 @@ class GitDatBackUI(QWidget):
         
         for count, index in enumerate(selected):
             entry = self.entries[index.row()]
+            repo = self.repos[index.row()]
             url = entry.get_url()
             _, name = parse_owner_name_from_url(url)
 
@@ -468,11 +484,13 @@ class GitDatBackUI(QWidget):
         # Remove from UI
         for index in sorted(selected, reverse=True):
             entry_to_remove = self.entries[index.row()]
+            repo_to_remove = self.repos[index.row()]
             entry_url = entry_to_remove.get_url()
 
             self.settings.remove_repo(entry_url)
 
             self.entries.remove(entry_to_remove)
+            self.repos.remove(repo_to_remove)
             self.entry_table.removeRow(index.row())
 
     def set_selection_selected(self):
@@ -532,15 +550,17 @@ class GitDatBackUI(QWidget):
 
         repos = []
 
-        for entry in self.iter_entries():
+        for idx, entry in enumerate(self.iter_entries()):
             is_checked = entry.get_pull()
             url = entry.get_url()
+            repo = self.repos[idx]
             
             logger.debug(f"{url=}")
+            logger.debug(f"{repo.name=}")
             logger.debug(f"{is_checked=}")
             
             if is_checked:
-                repos.append((Repository(url), entry))
+                repos.append((repo, entry))
                 entry.set_status(entry.status_fetching)
 
         if not repos:

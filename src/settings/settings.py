@@ -104,7 +104,7 @@ class Settings:
             if branches:
                 # Technically empty?
                 if len(branches) == 1:
-                    if not branches[0]:
+                    if not branches[0]: # Empty entry
                         branches.clear()
 
                 info_section = self.settings[self.KEY_REPOS][repo_url]

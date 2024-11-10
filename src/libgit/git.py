@@ -45,6 +45,7 @@ class Repository(git.Repo):
         # Add path and repo if destination dir and exists
         if destination_root:
             self.set_git_repo(destination_root)
+            self.collect_branches()
         
         # Weird monkey fix
         if not hasattr(self, "git_dir"):
@@ -148,41 +149,50 @@ class Repository(git.Repo):
 
         * :param:`repo_branches`
         """
+
+        self.head_name = self.get_head()
+        
         logger.info(f"[{self.name}] Collecting branch names for {self.name}")
 
         self.repo_branches.clear()
+        self.repo_branches_str.clear()
 
         if self.cloned_to and self.cloned_to.exists():
             logger.info(f"[{self.name}] {self.repo=}")
 
-            # self.repo_branches = [head.name.split('/', 1)[-1] for head in self.repo.remote().refs]
+            # Collect all remote branches
             self.repo_branches = [head for head in self.repo.remote().refs]
             branch_names = [head.name for head in self.repo.heads]
-            logger.debug(f"{branch_names=}")
+            logger.debug(f"[{self.name}] {branch_names=}")
             logger.debug(f"[{self.name}] Repo branches ({len(self.repo_branches)}): {self.repo_branches}")
 
-            # Remove origin/HEAD & main branch/master since we already have it
+            # Remove origin/HEAD & main branch/master whatever it is named
             _removes = ["HEAD", self.head_name]
-            for branch in self.repo_branches:
-                if branch.name.split('/', 1)[-1] in _removes:
-                    try:
-                        self.repo_branches.remove(branch)
-                    except ValueError:
-                        logger.info(f"{branch.name} not in branches")
+            logger.debug(f"[{self.name}] {_removes=}")
+            self.repo_branches = [
+                branch for branch in self.repo_branches 
+                if branch.name.split('/', 1)[-1] not in _removes
+            ]
             
             self.repo_branches_str = [branch.name.replace("origin/", '') for branch in self.repo_branches]
             logger.info(f"[{self.name}] {len(self.repo_branches)} branches for Repository {self.name}: {self.repo_branches}")
 
             self.collect_active_branches()
+
+            logger.debug(f"[{self.name}] {self.repo_branches_str=}")
+            logger.debug(f"[{self.name}] {self.active_branches_str=}")
         
         return self
     
     def collect_active_branches(self, active_cutoff_days:int = COMMIT_CUTOFF_DAYS) -> "Repository":
+        self.head_name = self.get_head()
+        
         if not self.repo_branches:
             logger.info(f"[{self.name}] Repo branches is empty, no active to collect")
             return self
 
         self.active_branches.clear()
+        self.active_branches_str.clear()
 
         for branch in self.repo_branches:
             active = self._filter_active(branch, active_cutoff_days=active_cutoff_days)
@@ -195,7 +205,28 @@ class Repository(git.Repo):
 
         return self
     
-    def _get_head(self) -> str:
+    def get_head(self) -> str:
+        if not self.repo:
+            logger.info("Unable to get repository HEAD. No repository")
+            return ''
+        
+        try:
+            head_branch = self.repo.head.reference
+            head_name = head_branch.name
+            logger.debug(f"[{self.name}] HEAD name: {head_name}")
+            if head_branch.tracking_branch(): # Tracking remote branch
+                logger.debug(f"[{self.name}] {head_name} is a remote tracking branch. Parsing only name")
+                head_name = head_branch.tracking_branch().name.replace("origin/", "")
+                logger.debug(f"Parsed HEAD name: {head_name}")
+        except TypeError:
+            logger.warning(f"[{self.name}] Unable to determine HEAD branch name.")
+            head_name = "main" # fallback to default
+            
+            logger.info(f"[{self.name}] Main branch identified as: {head_name}")
+
+        return head_name
+    
+    def _get_head_api(self) -> str:
         try:
             api_url = f"{API_GITHUB_REPOS}/{self.owner}/{self.name}"
             response = requests.get(api_url)
@@ -275,6 +306,10 @@ class Repository(git.Repo):
             if repo_dir.exists():
                 self.cloned_to = repo_dir
                 self.repo = git.Repo(str(self.cloned_to))
+
+                self.head_name = self.get_head()
+            else:
+                self.head_name = self._get_head_api()
 
     def __remove_dir(self, to_remove: Path) -> bool:
         # Try to remove the directory
