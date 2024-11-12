@@ -265,11 +265,11 @@ class Repository(git.Repo):
             commit_date = datetime.fromtimestamp(commit.committed_date).date()
             cutoff_date = (datetime.now() - timedelta(days=active_cutoff_days)).date()
             
-            logger.info(f"[{self.name}] Commit date for branch {branch_name}: {commit_date}")
+            logger.debug(f"[{self.name}] Commit date for branch {branch_name}: {commit_date}")
             logger.debug(f"[{self.name}] Cutoff date for branch {branch_name}: {cutoff_date}")
             
             days_ago = (datetime.now().date() - commit_date).days
-            logger.info(f"[{self.name}] Last commit for branch {branch_name}: {days_ago} days ago")
+            logger.debug(f"[{self.name}] Last commit for branch {branch_name}: {days_ago} days ago")
             
             return commit_date >= cutoff_date
         except Exception as e:
