@@ -4,6 +4,7 @@ Description=Run PyGitDatBack No-UI Service Weekly
 [Timer]
 OnCalendar={{SCHEDULE}}
 Persistent=true
+AccuracySec=10min
 RandomizeDelaySec=60
 
 [Install]

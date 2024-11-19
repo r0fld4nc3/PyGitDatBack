@@ -1,7 +1,8 @@
 import sys
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import List
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QSize, QDateTime, QRunnable
 
-from .utils import get_screen_info
+from .utils import get_screen_info, get_current_timestamp, to_datetime
 from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS, DRY_RUN
 from log import create_logger
 from settings import Settings
@@ -547,6 +548,12 @@ class GitDatBackUI(QWidget):
 
     def pull_repos(self):
         self.set_buttons_state_while_task(False)
+        
+        # TODO: Remove after testing
+        # if not GitDatBackUI.should_run_service():
+            # self.set_buttons_state_while_task(True)
+            # self.tell("Service run conditions not met. Checks logs.")
+            # return False
 
         repos = []
 
@@ -585,11 +592,63 @@ class GitDatBackUI(QWidget):
         # self.set_buttons_state_while_task(True)
 
     @staticmethod
+    def should_run_service() -> bool:
+        settings = Settings()
+
+        schedule = settings.get_schedule_type()
+
+        # Check for timestamp and if we should run
+        current_time = to_datetime(get_current_timestamp())
+        retrieved_time = to_datetime(settings.get_last_run())
+
+        logger.info(f"Schedule type:  {schedule}")
+        logger.info(f"Current time:   {current_time}")
+        logger.info(f"Retrieved time: {retrieved_time}")
+
+        # Scenario Daily
+        if schedule == systemd.ScheduleTypes.DAILY.value:
+            set_time = settings.get_scheduled_time().split(':')
+            if current_time.date() == retrieved_time.date():
+                passed_hours = current_time.hour - retrieved_time.hour
+                logger.debug("We're on the same date")
+                logger.debug(f"{set_time=}")
+                logger.debug(f"{passed_hours=}")
+
+                if passed_hours >= 1:
+                    # At least an hour as passed
+                    # If last run is 18 or above, don't run
+                    if current_time.hour >= int(set_time[0]):
+                        logger.info(f"Service has not ran today at scheduled time.")
+                        return True
+                    else:
+                        logger.info(f"Service not yet ready to run. Should run at {set_time[0]} and not at {current_time.hour}")
+                        return False
+                else:
+                    logger.info("Time threshold not reached. Not running service")
+                    return False
+            else:
+                logger.debug("It's a different day")
+                # If last run is 18 or above, don't run
+                if current_time.hour >= int(set_time[0]):
+                    logger.info(f"Service has not ran today at scheduled time.")
+                    return True
+                else:
+                    logger.info(f"Service not yet ready to run. Should run at {set_time[0]} and not at {current_time.hour}")
+                    return False
+
+        return False
+
+    @staticmethod
     def pull_repos_no_ui():
         logger.warning("Pull Repos lacks full implementation.")
         repos: list[Repository] = []
 
+        # Check for timestamp and if we should run
+        if not GitDatBackUI.should_run_service():
+            return False
+
         settings = Settings()
+
         saved_repos = settings.get_repos()
 
         logger.info("Iterating saved repos...")
@@ -624,7 +683,8 @@ class GitDatBackUI(QWidget):
                     future.result()
                 except Exception as e:
                     logger.error(f"Error pulling repository: {repo.url}: {e}")
-        
+
+        settings.set_last_run(get_current_timestamp())
         settings.save_config()
         logger.info("Pull Repos No UI finished")
 
@@ -660,6 +720,7 @@ class GitDatBackUI(QWidget):
         if self.check_if_all_completed():
             self.tell("Cloning completed")
             self.set_buttons_state_while_task(True)
+            self.settings.set_last_run(get_current_timestamp())
                 
     def on_clone_error(self, repo_name, error_msg):
         # logger.error(f"Error cloning repository {repo_name}: {error_msg}")

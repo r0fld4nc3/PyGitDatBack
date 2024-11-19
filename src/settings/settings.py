@@ -33,6 +33,7 @@ class Settings:
     KEY_BRANCHES = "branches"
     KEY_WIN_SIZE = "window_size"
     KEY_REPO_LOC = "locations"
+    KEY_LAST_RUN = "last_run"
 
     settings = {
         KEY_SAVE_TO: "",
@@ -43,7 +44,8 @@ class Settings:
         KEY_SCHEDULED_TIME: "",
         KEY_SERVICE_SET: False,
         KEY_REPOS: {},
-        KEY_WIN_SIZE: ""
+        KEY_WIN_SIZE: "",
+        KEY_LAST_RUN: ""
     }
     
     _config_file_name = "pygitdatback-settings.json"
@@ -221,6 +223,15 @@ class Settings:
         logger.info(f"Repository locations: {locations}")
 
         return locations
+    
+    def get_last_run(self) -> str:
+        last_run = self.settings.get(self.KEY_LAST_RUN, "")
+        logger.info(f"Got last run timestamp: {last_run}")
+        return last_run
+
+    def set_last_run(self, ts: str):
+        self.settings[self.KEY_LAST_RUN] = ts
+        logger.info(f"Set last run timestamp to: {ts}")
 
     def load_config(self) -> dict:
         logger.info(f"{CONFIG_FOLDER=}")
