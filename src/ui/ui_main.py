@@ -674,6 +674,7 @@ class GitDatBackUI(QWidget):
             settings.add_repo_locations(url, save_to)
             logger.info(f"Finished processing {url}")
 
+        errors = 0
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS) as executor:
             future_to_repo = {executor.submit(clone_and_update_repo, repo): repo for repo in repos}
 
@@ -683,8 +684,12 @@ class GitDatBackUI(QWidget):
                     future.result()
                 except Exception as e:
                     logger.error(f"Error pulling repository: {repo.url}: {e}")
+                    errors += 1
 
-        settings.set_last_run(get_current_timestamp())
+        # If error margin is below 40%, we set timestamp
+        if errors < int(len(repos) * .4):
+            settings.set_last_run(get_current_timestamp())
+
         settings.save_config()
         logger.info("Pull Repos No UI finished")
 
