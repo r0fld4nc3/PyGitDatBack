@@ -1,0 +1,12 @@
+[project]
+name = "pygitdatback"
+version = "0.0.1"
+description = "Quickly add, remove and backup GitHub repositories to a centralised location."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gitpython==3.1.45",
+    "psutil==7.1.0",
+    "pyside6-essentials==6.8",
+    "requests==2.32.5",
+]

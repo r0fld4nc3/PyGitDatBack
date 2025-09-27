@@ -1,10 +1,11 @@
 import argparse
 
-from log import create_logger, reset_log_file
 from conf_globals import G_LOG_LEVEL
+from log import create_logger, reset_log_file
 from ui import GitDatBackUI
 
 logger = create_logger(__name__, G_LOG_LEVEL)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Main entry point for the application.")
@@ -17,11 +18,13 @@ def main():
     else:
         launch_ui()
 
+
 def launch_ui() -> bool:
     reset_log_file()
     logger.info("Launching GUI application")
     app = GitDatBackUI()
     app.show()
+
 
 def launch_no_ui() -> bool:
     reset_log_file()
