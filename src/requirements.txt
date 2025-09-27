@@ -1,4 +1,0 @@
-GitPython
-requests
-psutil
-PySide6-Essentials>=6.8
