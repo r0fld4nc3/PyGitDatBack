@@ -2,6 +2,8 @@
  A simple way to locally backup GitHub repositories.
 
  # Launching
+ Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs the right Python version and the dependencies on first launch.
+
  Once cloned, launching can be done via the launch.sh file.
  Ensure it is runnable as a programme.
  
@@ -13,6 +15,8 @@
  ```bash
  ./launch.sh
  ```
+
+ Arguments are passed on to the app, e.g. `./launch.sh --debug` for debug logging.
 
  # Backups
  Each repository is backed up to `<backup root>/<owner>/<repository>.git`.
