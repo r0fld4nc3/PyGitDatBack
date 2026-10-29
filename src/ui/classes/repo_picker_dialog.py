@@ -63,6 +63,9 @@ class RepoPickerDialog(QDialog):
         self._checked: dict[str, bool] = {}
         self._items: dict[str, QTreeWidgetItem] = {}
         self._forks: set[str] = set()
+        # Set once GitHub has listed the account, for the status text
+        self._listed_count: int | None = None
+        self._gone_count = 0
 
         self.setWindowTitle(f"Repositories of {owner}")
         self.setModal(True)
@@ -78,6 +81,7 @@ class RepoPickerDialog(QDialog):
         self.forks_checkbox = QCheckBox("Include forks")
         self.forks_checkbox.setChecked(include_forks)
         self.forks_checkbox.toggled.connect(self._apply_visibility)
+        self.forks_checkbox.toggled.connect(self._update_status)
 
         self.select_all_button = QPushButton("Select All")
         self.select_all_button.clicked.connect(lambda: self._set_visible_checked(True))
@@ -145,12 +149,35 @@ class RepoPickerDialog(QDialog):
             item = self._add_row(name, "No longer on GitHub. Backup kept.", checkable=False)
             item.setDisabled(True)
 
-        gone = len(on_disk - listed_names)
-        self.status_label.setText(
-            f"{len(listed)} repositories on GitHub. Untick any to skip. New repositories are included automatically."
-            + (f"\n{gone} backed up repositories are no longer on GitHub but their backups are kept." if gone else "")
-        )
+        self._listed_count = len(listed)
+        self._gone_count = len(on_disk - listed_names)
+
+        if self._forks:
+            self.forks_checkbox.setText(f"Include forks ({len(self._forks)})")
+
+        self._update_status()
         self._finish_loading()
+
+    def _update_status(self, *_):
+        """Explain what the list shows, so hidden forks don't look like missing repositories."""
+        if self._listed_count is None:
+            return  # Still loading, or GitHub couldn't be reached (see _on_failed)
+
+        forks = len(self._forks)
+        own = self._listed_count - forks
+
+        if not forks:
+            text = f"{own} repositories on GitHub."
+        elif self.forks_checkbox.isChecked():
+            text = f"{self._listed_count} repositories on GitHub, including {forks} forks."
+        else:
+            text = f"{own} repositories on GitHub. ({forks} hidden. Tick Include forks to also back them up)."
+
+        text += " Untick any to skip. New repositories are included automatically."
+
+        if self._gone_count:
+            text += f"\n{self._gone_count} backed up repositories are no longer on GitHub but their backups are kept."
+        self.status_label.setText(text)
 
     def _on_failed(self, _task, error: Exception):
         if not isinstance(error, GitHubError):
