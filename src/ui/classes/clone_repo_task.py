@@ -44,8 +44,6 @@ class CloneRepoTask(QRunnable):
                 logger.debug(f"[{self.repo.url}] Sleeping for {_sleep}")
                 self.signals.status.emit(self.repo.url, f"{self.entry.status_fetching} ({_sleep})")
 
-                if _sleep == 7:
-                    raise Exception("Test exception, hit 7")
                 sleep(_sleep)
             self.signals.finished.emit(self.repo.url)
         except Exception as e:
