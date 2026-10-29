@@ -4,10 +4,10 @@ from time import sleep
 from PySide6.QtCore import QRunnable, QThread, QThreadPool, QObject
 
 from .clone_repo_task import CloneRepoTask
-from conf_globals import G_LOG_LEVEL, MAX_CONCURRENT_TASKS
-from log import create_logger
+from conf_globals import MAX_CONCURRENT_TASKS
+import logging
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 
 class TaskQueue(QObject):

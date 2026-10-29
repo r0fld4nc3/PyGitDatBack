@@ -3,11 +3,11 @@ from typing import Tuple
 from pathlib import Path
 from enum import Enum
 
-from conf_globals import G_LOG_LEVEL, HOST, APP_NAME
-from log import create_logger
+from conf_globals import HOST, APP_NAME
+import logging
 from utils import get_os_env_config_folder
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 _THIS_FILE_PATH = Path(__file__).parent.resolve()
 

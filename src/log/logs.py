@@ -1,53 +1,54 @@
-import os
 import logging
+from logging import FileHandler
 from pathlib import Path
-from .path_helpers import get_os_env_config_folder, ensure_paths
-from conf_globals import HOST, APP_NAME
+
+from conf_globals import APP_NAME, HOST
+
+from .path_helpers import get_os_env_config_folder
 
 LOG_FILE = get_os_env_config_folder() / HOST / APP_NAME / f"{APP_NAME}.log"
-print(f"{LOG_FILE=}")
 
-LEVELS = {
-    0: logging.DEBUG,
-    1: logging.INFO,
-    2: logging.WARNING,
-    3: logging.ERROR
-}
-
-def create_logger(logger_name: str, level: int) -> logging.Logger:
-    # Create needed folder if it doesn't exist
-    if not get_os_env_config_folder().exists():
-        os.makedirs(get_os_env_config_folder(), exist_ok=True)
-
-    ensure_paths(LOG_FILE.parent)
-
-    if not LOG_FILE.exists():
-        with open(LOG_FILE, 'w', encoding="utf-8") as f:
-            f.write('')
-
-    logger = logging.getLogger(logger_name)
-
-    logger.setLevel(LEVELS.get(level, 1))
-
-    handler_stream = logging.StreamHandler()
-    handler_file = logging.FileHandler(LOG_FILE)
-
-    formatter = logging.Formatter(f"[%(asctime)s] [%(levelname)s] [%(name)s] [%(funcName)s] %(message)s", 
-                                  datefmt="%d-%m-%Y %H:%M:%S")
-    handler_stream.setFormatter(formatter)
-    handler_file.setFormatter(formatter)
-
-    # Add the handlers if not present already
-    if not any(isinstance(handler, logging.StreamHandler) for handler in logger.handlers):
-        logger.addHandler(handler_stream)
-
-    if not any(isinstance(handler, logging.FileHandler) and handler.baseFilename == LOG_FILE for handler in logger.handlers):
-        logger.addHandler(handler_file)
-
-    return logger
+# Third-party loggers that are very chatty at DEBUG level
+_NOISY_LOGGERS = ("git", "urllib3", "requests")
 
 
-def reset_log_file() -> None:
-    if Path(LOG_FILE).exists():
-        with open(LOG_FILE, 'w') as f:
-            f.write('')
+def configure_logging(level: int = logging.INFO, log_file: Path = LOG_FILE, console: bool = True) -> None:
+    """
+    Set up the root logger once, at startup.
+    Modules then get their own logger with `logging.getLogger(__name__)`,
+    which passes records up to the root handlers configured here.
+    """
+    if log_file.exists() and not log_file.is_file():
+        raise RuntimeError(f"Log file path exists but is not a file: '{log_file}'")
+
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    formatter = logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] [%(funcName)s] %(message)s", datefmt="%d-%m-%Y %H:%M:%S"
+    )
+
+    # Remove any pre-existing handlers. Important when running in dev
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        handler.close()
+
+    file_handler = FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    if console:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
+
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(max(root.level, logging.WARNING))
+
+
+def reset_log_file(log_file: Path = LOG_FILE) -> None:
+    if log_file.exists() and log_file.is_file():
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write("")

@@ -1,10 +1,9 @@
 from datetime import datetime
 from PySide6.QtWidgets import QApplication
 
-from log import create_logger
-from conf_globals import G_LOG_LEVEL
+import logging
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 def get_screen_info(app: QApplication) -> tuple:
     # Get the primary screen

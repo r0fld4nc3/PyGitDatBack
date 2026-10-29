@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 from typing import Union
 
-from conf_globals import G_LOG_LEVEL, HOST, APP_NAME
+from conf_globals import HOST, APP_NAME
 from utils import get_os_env_config_folder, get_home_folder
-from log import create_logger
+import logging
 
 CONFIG_FOLDER = get_os_env_config_folder() / HOST / APP_NAME
 
-logger = create_logger("Settings", G_LOG_LEVEL)
+logger = logging.getLogger("Settings")
 
 
 class Settings:

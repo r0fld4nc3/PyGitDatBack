@@ -3,12 +3,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDateTime, Qt
 
-from conf_globals import G_LOG_LEVEL
-from log import create_logger
+import logging
 
 from . import AlignedWidget
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 
 class TableRepoEntry(QWidget):

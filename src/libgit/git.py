@@ -11,11 +11,11 @@ from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-from log import create_logger
-from conf_globals import G_LOG_LEVEL, COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
+import logging
+from conf_globals import COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
 from utils import get_env_tempdir
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 API_GITHUB_NETLOC = "https://api.github.com"
 API_GITHUB_REPOS = f"{API_GITHUB_NETLOC}/repos"
@@ -375,10 +375,10 @@ class Repository(git.Repo):
                 attempt += 1
                 no_conn = False
 
-                if "exit code(128)" in e:
+                if "exit code(128)" in str(e):
                     no_conn = True
 
-                if no_conn and G_LOG_LEVEL > 0:
+                if no_conn and not logger.isEnabledFor(logging.DEBUG):
                     logger.info(f"[{self.name}] Clone attempt {attempt} failed: Unable to connect due to exit code(128)")
                 else:
                     logger.warning(f"[{self.name}] Clone attempt {attempt} failed: {e}")
@@ -387,7 +387,7 @@ class Repository(git.Repo):
                     logger.info(f"[{self.name}] Waiting {self.retry_delay} seconds before retry...")
                     time.sleep(self.retry_delay)
                 else:
-                    if no_conn and G_LOG_LEVEL > 0:
+                    if no_conn and not logger.isEnabledFor(logging.DEBUG):
                         logger.info(f"[{self.name}] All {self.max_retries} attempts failed: Unable to connect due to exit code(128)")
                     else:
                         logger.error(f"[{self.name}] All {self.max_retries} attempts failed", exc_info=1)

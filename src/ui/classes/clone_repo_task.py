@@ -5,10 +5,10 @@ import secrets
 from libgit import Repository
 from .table_entry_repos import TableRepoEntry
 from .worker_signals import WorkerSignals
-from conf_globals import G_LOG_LEVEL, DRY_RUN
-from log import create_logger
+from conf_globals import DRY_RUN
+import logging
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 class CloneRepoTask(QRunnable):
     def __init__(self, repo, path, entry, collect_branches: bool = False):

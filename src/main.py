@@ -1,17 +1,23 @@
 import argparse
+import logging
 
-from conf_globals import G_LOG_LEVEL
-from log import create_logger, reset_log_file
+from log import LOG_FILE, configure_logging, reset_log_file
 from ui import GitDatBackUI
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Main entry point for the application.")
     parser.add_argument("--no-ui", action="store_true", help="Run the pull routine automatically without UI and close.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
     args = parser.parse_args()
+
+    # Configure the root logger/logging at startup.
+    reset_log_file(LOG_FILE)
+    configure_logging(logging.DEBUG if args.debug else logging.INFO, LOG_FILE)
+    logger.info(f"Log file: {LOG_FILE}")
 
     if args.no_ui:
         launch_no_ui()
@@ -20,14 +26,12 @@ def main():
 
 
 def launch_ui() -> bool:
-    reset_log_file()
     logger.info("Launching GUI application")
     app = GitDatBackUI()
     app.show()
 
 
 def launch_no_ui() -> bool:
-    reset_log_file()
     logger.info("Launching no GUI")
     GitDatBackUI.pull_repos_no_ui()
     logger.info("Finished. Exiting.")

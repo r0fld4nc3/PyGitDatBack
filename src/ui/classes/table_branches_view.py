@@ -3,12 +3,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSize
 
-from conf_globals import G_LOG_LEVEL
-from log import create_logger
+import logging
 
 from . import AlignedWidget
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 # TODO: Select All, Deselect All, Select Selected, Deselect Selected buttons
 class TableBranchEntry(QWidget):

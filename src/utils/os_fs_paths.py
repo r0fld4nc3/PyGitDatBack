@@ -3,10 +3,9 @@ from pathlib import Path
 import platform
 import subprocess
 import shutil
-from log import create_logger
-from conf_globals import G_LOG_LEVEL
+import logging
 
-log = create_logger("OS FS Utils", G_LOG_LEVEL)
+log = logging.getLogger("OS FS Utils")
 
 WINDOWS = "windows"
 LINUX = "linux"

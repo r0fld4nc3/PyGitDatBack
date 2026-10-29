@@ -3,10 +3,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from conf_globals import G_LOG_LEVEL
-from log import create_logger
+import logging
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 class AlignedWidget(QWidget):
     def __init__(self, widget, alignment=Qt.AlignCenter, margins: tuple =None):

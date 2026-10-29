@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QSize, QDateTime, QRunnable
 
 from .utils import get_screen_info, get_current_timestamp, to_datetime
-from conf_globals import G_LOG_LEVEL, VERSION, MAX_CONCURRENT_TASKS, DRY_RUN
-from log import create_logger
+from conf_globals import VERSION, MAX_CONCURRENT_TASKS, DRY_RUN
+import logging
 from settings import Settings
 from libgit import Repository
 from libgit import validate_github_url, get_branches_and_commits, parse_owner_name_from_url
@@ -21,7 +21,7 @@ import systemd
 
 from .classes import TaskQueue, TableRepoEntry, TableBranchView, ServiceConfigWindow, CloneRepoTask, AlertDialog
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 
 class BranchTask(QRunnable):

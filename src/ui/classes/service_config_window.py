@@ -3,12 +3,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QSize
 
-from conf_globals import G_LOG_LEVEL
-from log import create_logger
+import logging
 from settings import Settings
 import systemd
 
-logger = create_logger(__name__, G_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 
 class ServiceConfigWindow(QDialog):
