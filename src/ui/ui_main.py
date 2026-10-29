@@ -1,10 +1,10 @@
 import logging
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum, auto
 from pathlib import Path
-from typing import List
+from typing import Callable, Optional
 
-from PySide6.QtCore import QDateTime, QSize
+from PySide6.QtCore import QSize, QThreadPool
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -17,280 +17,383 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTableWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 import settings
 import systemd
-from defines import DRY_RUN, MAX_CONCURRENT_TASKS, VERSION
+from backups import AccountProgress, BackupRun
+from defines import APP_NAME, APP_VERSION_STR, DRY_RUN, EntryKind
 from libgit import (
+    AccountPlan,
     Repository,
-    parse_owner_name_from_url,
+    existing_backups,
+    github_url,
+    owner_backup_dir,
+    parse_github_url,
+    plan_account,
     remove_dir,
-    validate_github_url,
 )
+from utils import TimestampFormat, timestamp
 
 from .classes import (
     AlertDialog,
-    CloneRepoTask,
+    BackupTask,
+    Column,
+    EntryStatus,
+    FunctionTask,
+    RepoPickerDialog,
     ServiceConfigWindow,
     TableRepoEntry,
-    TaskQueue,
 )
-from .utils import get_current_timestamp, get_screen_info
+from .utils import get_screen_info
 
 logger = logging.getLogger(__name__)
 
+SETTINGS_BUTTON_SIZE = 32  # px, square
+SETTINGS_ICON_SIZE = 20  # px, for the future cogwheel image
+
+
+class PullScope(Enum):
+    """Which rows the tick/untick buttons apply to."""
+
+    SELECTED = auto()
+    ALL = auto()
+
 
 class GitDatBackUI(QWidget):
-    APP_VERSION_STR = "v" + ".".join([str(x) for x in VERSION])
+    APP_VERSION_STR = f"{APP_VERSION_STR}"
 
     def __init__(self):
-        if not QApplication.instance():
-            self.app = QApplication(sys.argv)
-        else:
-            self.app = QApplication.instance()
+        self.app = QApplication.instance() or QApplication(sys.argv)
 
         super().__init__()
 
-        # Settings manager
+        # Settings manager. Values in `self.config.settings`
         self.config = settings.get()
 
-        # Set app constraints
-        self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
+        self.setWindowTitle(f"{APP_NAME} ({self.APP_VERSION_STR})")
         self.resize(QSize(self.config.settings.window_width, self.config.settings.window_height))
 
-        # Tasks
-        self.task_queue = TaskQueue()
+        # Background work, at most `max_concurrent_tasks` at a time
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(self.config.settings.max_concurrent_tasks)
 
-        # Tracking
-        self.entries: List[TableRepoEntry] = []
-        self.repos: List[Repository] = []
+        # Each row is a repository or an account, see TableRepoEntry
+        self.entries: list[TableRepoEntry] = []
 
-        # Main layout
+        # State of the pull in progress, see pull_repos()
+        self._run: Optional[BackupRun] = None
+        self._run_pending = 0  # Tasks still to report back. The run is over at 0
+        self._run_rows: dict[str, TableRepoEntry] = {}  # Repository URL -> row it is reported on
+
+        self._build_ui()
+        self.load_saved_repos()
+
+    # ---------- Building the window ----------
+
+    def _build_ui(self):
         main_layout = QVBoxLayout()
+        main_layout.addLayout(self._build_settings_row())
+        main_layout.addLayout(self._build_input_row())
 
-        # Widgets
-        # Input field layout
-        input_layout = QHBoxLayout()
-
-        # Input field
-        self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Enter URL")
-
-        # Submit input button
-        self.submit_button = QPushButton("Add")
-        self.submit_button.clicked.connect(self.add_entry)
-
-        # Info Label
         self.info_label = QLabel()
-
-        # Main Table
-        self.entry_table = QTableWidget(0, 5)
-        self.entry_table.setHorizontalHeaderLabels(["Pull", "URL", "Branches", "Last Pulled", "Status"])
-        self.entry_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.entry_table.cellDoubleClicked.connect(self.handle_cell_doubleclick)
-        self.entry_table.horizontalHeader().setStretchLastSection(True)
-        self.entry_table.setColumnWidth(0, 40)
-        self.entry_table.setColumnWidth(1, 400)
-        self.entry_table.setColumnWidth(2, 150)
-        self.entry_table.setColumnWidth(3, 175)
-        self.entry_table.setColumnWidth(4, 100)
-        # Selection behaviour
-        self.entry_table.setSelectionBehavior(QTableWidget.SelectRows)  # Select full rows
-
-        # Actions Layout - Where we put button actions
-        self.actions_layout = QHBoxLayout()
-        self.actions_layout.setContentsMargins(0, 5, 0, 5)
-        self.actions_layout.setSpacing(10)  # Spacing between buttons
-
-        # Remove Button Layout - Where we put button actions
-        remove_button_layout = QHBoxLayout()
-        remove_button_layout.setContentsMargins(0, 5, 0, 10)
-        remove_button_layout.setSpacing(10)  # Spacing between buttons
-
-        # Removed Selected Button
-        self.remove_selected_button = QPushButton("Remove Selected")
-        self.remove_selected_button.clicked.connect(self.remove_selected_entries)
-        self.remove_selected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Select Selected Button
-        self.set_selection_selected_button = QPushButton("Select Selected")
-        self.set_selection_selected_button.clicked.connect(self.set_selection_selected)
-        self.set_selection_selected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Deselect Selected Button
-        self.set_selection_deselected_button = QPushButton("Deselect Selected")
-        self.set_selection_deselected_button.clicked.connect(self.set_selection_deselected)
-        self.set_selection_deselected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Select All Button
-        self.set_all_selected_button = QPushButton("Select All")
-        self.set_all_selected_button.clicked.connect(self.set_all_selected)
-        self.set_all_selected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Deselect All Button
-        self.set_all_deselected_button = QPushButton("Deselect All")
-        self.set_all_deselected_button.clicked.connect(self.set_all_deselected)
-        self.set_all_deselected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Backup Path Layout
-        self.backup_path_vertical_layout = QVBoxLayout()
-        self.backup_path_layout = QHBoxLayout()
-
-        # Backup Path Picker Label
-        self.lbl_pick_backup_path = QLabel("Backup Location:")
-
-        # Backup Path Input
-        self.backup_path_input = QLineEdit()
-        self.backup_path_input.setPlaceholderText("Root folder for repositories...")
-        self.backup_path_input.setText(str(self.repos_backup_path))
-        self.backup_path_input.editingFinished.connect(self.set_backup_path)
-        self.backup_path_input.setDisabled(True)
-
-        # Backup Path Pick Button
-        self.pick_backup_path_button = QPushButton("Pick")
-        self.pick_backup_path_button.clicked.connect(self.pick_backup_path)
-        self.pick_backup_path_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Pull Repos Button
-        self.pull_button = QPushButton("Pull Repos")
-        self.pull_button.setMinimumHeight(40)
-        self.pull_button.clicked.connect(self.pull_repos)
-
-        # Register Services Buttons layout
-        register_services_layout = QHBoxLayout()
-
-        # Service Options
-        self.service_options_button = QPushButton("Service Options")
-        self.service_options_button.clicked.connect(self.show_service_options_dialog)
-
-        # Register Service Button
-        self.register_service_button = QPushButton("Register Service")
-        self.register_service_button.clicked.connect(self.register_background_service)
-
-        # Unregister Service Button
-        self.unregister_service_button = QPushButton("Unregister Service")
-        self.unregister_service_button.clicked.connect(self.unregister_background_service)
-
-        # Add widgets to input layout
-        input_layout.addWidget(self.url_input)
-        input_layout.addWidget(self.submit_button)
-
-        # Add widget to actions_layout
-        self.actions_layout.addWidget(self.set_selection_selected_button)
-        self.actions_layout.addWidget(self.set_selection_deselected_button)
-        self.actions_layout.addWidget(self.set_all_selected_button)
-        self.actions_layout.addWidget(self.set_all_deselected_button)
-        self.actions_layout.addStretch()
-
-        # Add widget to remove_button layout
-        remove_button_layout.addWidget(self.remove_selected_button)
-        remove_button_layout.addStretch()
-
-        # Add widgets to backup path layout
-        self.backup_path_vertical_layout.addWidget(self.lbl_pick_backup_path)
-        self.backup_path_layout.addWidget(self.backup_path_input)
-        self.backup_path_layout.addWidget(self.pick_backup_path_button)
-
-        # Add widgets to register services layout
-        register_services_layout.addWidget(self.service_options_button)
-        register_services_layout.addWidget(self.register_service_button)
-        register_services_layout.addWidget(self.unregister_service_button)
-        register_services_layout.addStretch()
-
-        # Add widgets to main layout
-        main_layout.addLayout(input_layout)
         main_layout.addWidget(self.info_label)
-        main_layout.addLayout(self.actions_layout)
-        main_layout.addWidget(self.entry_table)
-        main_layout.addLayout(remove_button_layout)
-        main_layout.addLayout(self.backup_path_vertical_layout)
-        self.backup_path_vertical_layout.addLayout(self.backup_path_layout)
-        main_layout.addLayout(register_services_layout)
+
+        # Table Actions Buttons
+        main_layout.addLayout(self._build_table_actions_buttons_row())
+        main_layout.addWidget(self._build_table())
+
+        # Remove Selected
+        self.remove_selected_button = self._button("Remove Selected", self.remove_selected_entries, fixed=True)
+        main_layout.addLayout(self._row([self.remove_selected_button], margins=(0, 5, 0, 10), stretch=True))
+
+        # Backup Path Edit and Layout
+        main_layout.addLayout(self._build_backup_path_rows())
+
+        # Service Buttons
+        self.service_options_button = self._button("Service Options", self.show_service_options_dialog)
+        self.register_service_button = self._button("Register Service", self.register_background_service)
+        self.unregister_service_button = self._button("Unregister Service", self.unregister_background_service)
+        main_layout.addLayout(
+            self._row(
+                [self.service_options_button, self.register_service_button, self.unregister_service_button],
+                stretch=True,
+            )
+        )
+
+        # Pull Repos main button
+        self.pull_button = self._button("Pull Repos", self.pull_repos)
+        self.pull_button.setMinimumHeight(40)
         main_layout.addWidget(self.pull_button)
 
         self.setLayout(main_layout)
 
-        self.load_saved_repos()
+        # Disabled while a pull runs
+        self._task_buttons = [
+            self.submit_button,
+            self.settings_button,
+            self.set_selection_selected_button,
+            self.set_selection_deselected_button,
+            self.set_all_selected_button,
+            self.set_all_deselected_button,
+            self.remove_selected_button,
+            self.pick_backup_path_button,
+            self.service_options_button,
+            self.register_service_button,
+            self.unregister_service_button,
+            self.pull_button,
+        ]
+
+    def _build_input_row(self) -> QHBoxLayout:
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText(
+            "Repository URL, or account URL (https://github.com/<user>/) for all its repositories"
+        )
+        self.submit_button = self._button("Add", self.add_entry)
+        return self._row([self.url_input, self.submit_button])
+
+    def _build_table_actions_buttons_row(self) -> QHBoxLayout:
+        self.set_selection_selected_button = self._button(
+            "Select Selected", lambda: self.set_pull(PullScope.SELECTED, True), fixed=True
+        )
+        self.set_selection_deselected_button = self._button(
+            "Deselect Selected", lambda: self.set_pull(PullScope.SELECTED, False), fixed=True
+        )
+        self.set_all_selected_button = self._button(
+            "Select All", lambda: self.set_pull(PullScope.ALL, True), fixed=True
+        )
+        self.set_all_deselected_button = self._button(
+            "Deselect All", lambda: self.set_pull(PullScope.ALL, False), fixed=True
+        )
+        return self._row(
+            [
+                self.set_selection_selected_button,
+                self.set_selection_deselected_button,
+                self.set_all_selected_button,
+                self.set_all_deselected_button,
+            ],
+            margins=(0, 5, 0, 5),
+            stretch=True,
+        )
+
+    def _build_table(self) -> QTableWidget:
+        self.entry_table = QTableWidget(0, len(Column))
+        self.entry_table.setHorizontalHeaderLabels([column.header for column in Column])
+        self.entry_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.entry_table.cellDoubleClicked.connect(self.handle_cell_doubleclick)
+        self.entry_table.horizontalHeader().setStretchLastSection(True)
+        for column in Column:
+            self.entry_table.setColumnWidth(column, column.width)
+        self.entry_table.setSelectionBehavior(QTableWidget.SelectRows)  # Select full rows
+        return self.entry_table
+
+    def _build_backup_path_rows(self) -> QVBoxLayout:
+        self.backup_path_input = QLineEdit()
+        self.backup_path_input.setPlaceholderText("Root folder for repositories...")
+        self.backup_path_input.setText(str(self.repos_backup_path))
+        self.backup_path_input.editingFinished.connect(self.set_backup_path)
+        self.backup_path_input.setDisabled(False)
+
+        self.pick_backup_path_button = self._button("Pick", self.pick_backup_path, fixed=True)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Backup Location:"))
+        layout.addLayout(self._row([self.backup_path_input, self.pick_backup_path_button]))
+        return layout
+
+    def _build_settings_row(self) -> QHBoxLayout:
+        # Tool button: Qt's widget for icon buttons. Fixed size keeps it square whatever the window does.
+        self.settings_button = QToolButton()
+        self.settings_button.setFixedSize(SETTINGS_BUTTON_SIZE, SETTINGS_BUTTON_SIZE)
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.clicked.connect(self.open_settings_dialog)
+
+        # Placeholder until there is an image.
+        #   self.settings_button.setIcon(QIcon("<path to icon>"))
+        #   self.settings_button.setIconSize(QSize(SETTINGS_ICON_SIZE, SETTINGS_ICON_SIZE))
+        self.settings_button.setText("⚙")
+        font = self.settings_button.font()
+        font.setPointSize(16)
+        self.settings_button.setFont(font)
+
+        # The stretch takes all free space on the left, pinning the button to the window's right edge
+        layout = QHBoxLayout()
+        layout.addStretch()
+        layout.addWidget(self.settings_button)
+        return layout
+
+    def open_settings_dialog(self):
+        # TODO: dialog for editable settings (max concurrent tasks, ...)
+        logger.info("Settings dialog not implemented yet")
+
+    @staticmethod
+    def _button(text: str, slot: Callable, fixed: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.clicked.connect(slot)
+        if fixed:
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return button
+
+    @staticmethod
+    def _row(widgets: list[QWidget], margins: Optional[tuple] = None, stretch: bool = False) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        if margins:
+            layout.setContentsMargins(*margins)
+            layout.setSpacing(10)
+        for widget in widgets:
+            layout.addWidget(widget)
+        if stretch:
+            layout.addStretch()
+        return layout
+
+    # ---------- Rows ----------
 
     @property
     def repos_backup_path(self) -> Path:
-        """Root folder for backups, always read from settings so there is one source of truth."""
+        """Root folder for backups, always read from settings."""
         return self.config.settings.backup_root_path()
 
     def load_saved_repos(self):
+        for owner, account_settings in self.config.settings.accounts.items():
+            self.add_account_row(owner, account_settings.do_pull, account_settings.last_pulled)
+
         for url, repo_settings in self.config.settings.repos.items():
-            self.add_to_table(url, repo_settings.do_pull, repo_settings.last_pulled)
+            try:
+                self.add_repo_row(url, repo_settings.do_pull, repo_settings.last_pulled)
+            except ValueError as e:
+                logger.warning(f"Skipping saved repository: {e}")
 
         self.tell("Status: Ready")
-
         self.url_input.clear()
 
     def add_entry(self):
-        # Manual user entry submission
         url = self.url_input.text().strip()
 
         if not url:
-            self.tell(f"Nothing to add.")
+            self.tell("Nothing to add.")
             return
 
-        if self.entry_exists(url):
-            self.tell(f"{url} already exists.")
-            return
-
-        if not validate_github_url(url):
+        target = parse_github_url(url)
+        if target is None:
             logger.info(f"Unable to validate URL: {url}")
             self.tell(f"Unable to validate {url}")
             return
 
-        self.config.repo(url)  # Adds and saves it
-        self.add_to_table(url, True, "n/a")
+        if target.kind == EntryKind.ACCOUNT:
+            if self.find_entry(EntryKind.ACCOUNT, target.owner):
+                self.tell(f"Account {target.owner} already added.")
+                return
 
+            self.config.account(target.owner)  # Adds and saves it
+            entry = self.add_account_row(target.owner, True, "n/a")
+            self.url_input.clear()
+            # Let the user untick repositories straight away
+            self.choose_account_repos(entry)
+            return
+
+        if self.find_entry(EntryKind.REPO, target.url) or self.find_entry(EntryKind.REPO, url):
+            self.tell(f"{url} already exists.")
+            return
+
+        self.config.repo(target.url)  # Adds and saves it
+        self.add_repo_row(target.url, True, "n/a")
         self.url_input.clear()
 
-    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "") -> TableRepoEntry:
-        entry = TableRepoEntry(url)
+    def add_repo_row(self, url: str, do_pull: bool, last_pulled: str = "") -> TableRepoEntry:
         repo = Repository(url)
+        entry = TableRepoEntry(url, EntryKind.REPO, url, repo=repo)
+        entry.set_branch_count(repo.branch_count(self.repos_backup_path))
+        return self._insert_row(entry, do_pull, last_pulled)
 
+    def add_account_row(self, owner: str, do_pull: bool, last_pulled: str = "") -> TableRepoEntry:
+        entry = TableRepoEntry(github_url(owner), EntryKind.ACCOUNT, owner)
+        entry.url_label.setToolTip("Double-click to choose which repositories to back up")
+        self._update_account_summary(entry)
+        return self._insert_row(entry, do_pull, last_pulled)
+
+    def _insert_row(self, entry: TableRepoEntry, do_pull: bool, last_pulled: str) -> TableRepoEntry:
         row_pos = self.entry_table.rowCount()
         self.entry_table.insertRow(row_pos)
 
-        self.entry_table.setCellWidget(row_pos, 0, entry.pull_checkbox_widget)
-        self.entry_table.setCellWidget(row_pos, 1, entry.url_label)
-        self.entry_table.setCellWidget(row_pos, 2, entry.branches_label_widget)
-        self.entry_table.setCellWidget(row_pos, 3, entry.timestamp_widget)
-        self.entry_table.setCellWidget(row_pos, 4, entry.status_widget)
+        for column, widget in entry.cell_widgets().items():
+            self.entry_table.setCellWidget(row_pos, column, widget)
 
-        # Handle pull checkbox. Connected after setting it, so loading doesn't write anything
+        # Connected after setting it, so loading doesn't write anything
         entry.set_pull(do_pull)
         entry.pull_checkbox.toggled.connect(lambda checked, e=entry: self._on_pull_toggled(e, checked))
 
-        # Handle timestamp
-        if timestamp:
-            entry.set_timestamp(timestamp)
-
-        # Branch count from the existing backup, if any
-        entry.set_branch_count(repo.branch_count(self.repos_backup_path))
+        if last_pulled:
+            entry.set_timestamp(last_pulled)
 
         self.entries.append(entry)
-        self.repos.append(repo)
 
-        logger.info(f"Added entry: {url}")
-        self.tell(f"Added entry: {url}")
-
+        logger.info(f"Added entry: {entry.get_url()}")
+        self.tell(f"Added entry: {entry.get_url()}")
         return entry
 
+    def find_entry(self, kind: EntryKind, key: str) -> Optional[TableRepoEntry]:
+        """The row for a repository URL or account owner, or None."""
+        key = key.strip()
+        return next((e for e in self.entries if e.kind == kind and e.key == key), None)
+
     def _on_pull_toggled(self, entry: TableRepoEntry, checked: bool):
-        self.config.repo(entry.get_url()).do_pull = checked
+        self.config.entry(entry.kind, entry.key).do_pull = checked
+
+    def set_pull(self, scope: PullScope, checked: bool):
+        """Tick or untick the selected rows, or all rows, with a single settings write."""
+        if scope == PullScope.SELECTED:
+            rows = [self.entries[index.row()] for index in self.entry_table.selectionModel().selectedRows()]
+        else:
+            rows = self.entries
+
+        with self.config.batch():
+            for entry in rows:
+                entry.set_pull(checked)
+
+        what = "selection" if scope == PullScope.SELECTED else "all"
+        self.tell(f"{'Selected' if checked else 'Deselected'} {what}.")
+
+    def _update_account_summary(self, entry: TableRepoEntry):
+        """Branches column of an account row: how many repositories are backed up, and how many are skipped."""
+        backed_up = len(existing_backups(self.repos_backup_path, entry.key))
+        skipped = len(self.config.account(entry.key).skipped)
+        text = f"{backed_up} repos" if backed_up or skipped else "-"
+        if skipped:
+            text += f", {skipped} skipped"
+        entry.set_branches_text(text)
+
+    # ---------- Editing rows ----------
 
     def handle_cell_doubleclick(self, row, col):
-        if col != 1:  # Only the URL column is editable
+        entry = self.entries[row]
+
+        if entry.is_account:
+            if col in (Column.URL, Column.BRANCHES):
+                self.choose_account_repos(entry)
+        elif col == Column.URL:
+            self.edit_repo_url(entry)
+
+    def choose_account_repos(self, entry: TableRepoEntry):
+        """Open the repository picker for an account row and save the choices on OK."""
+        account = self.config.account(entry.key)
+        dialog = RepoPickerDialog(self, entry.key, self.repos_backup_path, account.skipped, account.include_forks)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            logger.info(f"Kept repository choices for {entry.key}")
             return
 
-        entry_item = self.entries[row]
-        entry_url = entry_item.get_url()
+        with self.config.batch():
+            account.skipped = dialog.skipped()
+            account.include_forks = dialog.include_forks()
+
+        self._update_account_summary(entry)
+        self.tell(f"{entry.key}: {len(account.skipped)} repositories skipped")
+
+    def edit_repo_url(self, entry: TableRepoEntry):
+        entry_url = entry.get_url()
 
         input_dialog = QInputDialog(self)
         input_dialog.setWindowTitle("Edit URL")
@@ -305,17 +408,18 @@ class GitDatBackUI(QWidget):
         if new_url == entry_url:
             return
 
-        if not validate_github_url(new_url):
-            self.tell(f"Unable to validate {new_url}")
+        target = parse_github_url(new_url)
+        if target is None or target.kind != EntryKind.REPO:
+            self.tell(f"Unable to validate {new_url}. Add accounts as a new entry.")
             return
 
-        if self.entry_exists(new_url):
+        if self.find_entry(EntryKind.REPO, new_url):
             self.tell(f"{new_url} already exists.")
             return
 
-        entry_item.set_url(new_url)
-        self.repos[row] = Repository(new_url)
-        entry_item.set_branch_count(self.repos[row].branch_count(self.repos_backup_path))
+        entry.set_url(new_url)
+        entry.repo = Repository(new_url)
+        entry.set_branch_count(entry.repo.branch_count(self.repos_backup_path))
 
         # Move the saved entry to the new URL, otherwise the old one comes back on next launch
         self.config.rename_repo(entry_url, new_url)
@@ -323,33 +427,7 @@ class GitDatBackUI(QWidget):
         logger.info(f"Edited {entry_url} to {new_url}")
         self.tell(f"Edited {entry_url} to {new_url}")
 
-    def iter_entries(self):
-        """Yield existing UrlEntry objects."""
-        for entry in self.entries:
-            yield entry
-
-    def iter_repos(self):
-        """Yield existing Repository objects."""
-        for repo in self.repos:
-            yield repo
-
-    def entry_exists(self, url: str) -> bool:
-        for entry_widget in self.iter_entries():
-            logger.debug(f"{entry_widget=}")
-            if entry_widget.url_label.text() == url:
-                logger.info(f"{url} already in list of entries.")
-                return True
-
-        return False
-
-    def repo_exists(self, url: str) -> bool:
-        for repo in self.iter_repos():
-            logger.debug(f"{repo=}")
-            if repo.url == url:
-                logger.info(f"Repo {url} already exists.")
-                return True
-
-        return False
+    # ---------- Removing rows ----------
 
     def remove_selected_entries(self):
         selected = self.entry_table.selectionModel().selectedRows()
@@ -358,114 +436,77 @@ class GitDatBackUI(QWidget):
             logger.info("Nothing selected to remove.")
             return
 
-        logger.info("Collecting URLs & Names to display in pop-up")
         display_cap = 20
-        urls_to_remove = []
-        names_to_remove = []
+        rows = [self.entries[index.row()] for index in selected]
+        names = [f"{entry.key} (account: all its backups)" if entry.is_account else entry.repo.name for entry in rows]
+        if len(names) > display_cap:
+            names = names[:display_cap] + ["(...)"]
 
-        for count, index in enumerate(selected):
-            entry = self.entries[index.row()]
-            repo = self.repos[index.row()]
-            url = entry.get_url()
-            _, name = parse_owner_name_from_url(url)
-
-            if url:
-                urls_to_remove.append(url)
-
-            # Cap for the display
-            if url and count < display_cap:
-                names_to_remove.append(name)
-            else:
-                name = "(...)"
-                if name not in names_to_remove:
-                    logger.info("Collection cap reached.")
-                    names_to_remove.append(name)
-
-        logger.debug(f"{names_to_remove=}")
-
-        names_to_remove_joined = "\n".join(names_to_remove)
-        query = f"Also remove from Disk?\n\nChoosing Yes will remove the cloned item(s) and backup(s) from known locations.\nThis operation is irreversible.\n\n{names_to_remove_joined}"
+        names_to_remove_joined = "\n".join(names)
+        query = f"Also remove from Disk?\n\nChoosing Yes will remove the backup(s) from known locations.\nThis operation is irreversible.\n\n{names_to_remove_joined}"
         qm = QMessageBox
-        logger.debug(query)
         query_ans = qm.question(self, "Remove from Disk?", query, qm.Yes | qm.No | qm.Cancel)
-        remove_from_disk = False
 
-        if query_ans == qm.Yes:
-            logger.debug("[remove_selected_entries] MessageBox: Yes")
-            remove_from_disk = True
-        elif query_ans == qm.No:
-            logger.debug("[remove_selected_entries] MessageBox: No")
-        else:
+        if query_ans not in (qm.Yes, qm.No):
             logger.debug("[remove_selected_entries] MessageBox: Cancel")
             return
 
-        if remove_from_disk:
-            for url in urls_to_remove:
-                # Every root this repo was backed up to, plus the current one
-                saved = self.config.settings.repos.get(url)
-                known = saved.locations if saved else []
-                repo_locations = [Path(loc) for loc in dict.fromkeys([*known, str(self.repos_backup_path)])]
-
-                repo = Repository(url)
-                for loc_path in repo_locations:
-                    # Current backup, then folders left behind by the old working-copy layout
-                    targets = [repo.backup_path(loc_path), loc_path / repo.name, loc_path / f"backup-{repo.name}"]
-
-                    for target in targets:
-                        if target.exists():
-                            logger.info(f"Removing {target}")
-                            remove_dir(target)
-
-                    # Tidy the owner folder once its last backup is gone
-                    owner_dir = repo.backup_path(loc_path).parent
-                    if owner_dir.is_dir() and not any(owner_dir.iterdir()):
-                        owner_dir.rmdir()
+        if query_ans == qm.Yes:
+            self._remove_backups_from_disk(rows)
 
         # Remove from UI and settings, with one settings write
         with self.config.batch():
-            for index in sorted(selected, reverse=True):
-                entry_to_remove = self.entries[index.row()]
-                repo_to_remove = self.repos[index.row()]
-
-                self.config.remove_repo(entry_to_remove.get_url())
-
-                self.entries.remove(entry_to_remove)
-                self.repos.remove(repo_to_remove)
+            for index in sorted(selected, key=lambda i: i.row(), reverse=True):
+                entry = self.entries[index.row()]
+                self.config.remove(entry.kind, entry.key)
+                self.entries.remove(entry)
                 self.entry_table.removeRow(index.row())
 
-    def set_selection_selected(self):
-        selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
-        logger.debug(f"{selected_indices=}")
+    def _remove_backups_from_disk(self, rows: list[TableRepoEntry]):
+        """
+        Delete the backups of the given rows from every place they were backed up to.
 
-        with self.config.batch():
-            for index in selected_indices:
-                self.entries[index].set_pull(True)
+        A backup still used by a row that is staying is kept: a repository that is also part of a
+        remaining account, or an account repository that is also added on its own.
+        """
+        removing = set(map(id, rows))
+        staying = [e for e in self.entries if id(e) not in removing]
+        staying_accounts = {e.key for e in staying if e.is_account}
+        staying_repo_names = {(e.repo.owner, e.repo.name) for e in staying if not e.is_account}
 
-        self.tell("Selected selection.")
+        def locations(entry: TableRepoEntry) -> list[Path]:
+            saved = self.config.find(entry.kind, entry.key)
+            known = saved.locations if saved else []
+            return [Path(loc) for loc in dict.fromkeys([*known, str(self.repos_backup_path)])]
 
-    def set_selection_deselected(self):
-        selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
-        logger.debug(f"{selected_indices=}")
+        def tidy_owner_dir(owner_dir: Path):
+            if owner_dir.is_dir() and not any(owner_dir.iterdir()):
+                owner_dir.rmdir()
 
-        with self.config.batch():
-            for index in selected_indices:
-                self.entries[index].set_pull(False)
+        for entry in rows:
+            for loc_path in locations(entry):
+                if entry.is_account:
+                    for name in existing_backups(loc_path, entry.key):
+                        if (entry.key, name) in staying_repo_names:
+                            logger.info(f"Keeping {entry.key}/{name}: it is also added on its own")
+                            continue
+                        remove_dir(Repository.of(entry.key, name).backup_path(loc_path))
+                    tidy_owner_dir(owner_backup_dir(loc_path, entry.key))
+                    continue
 
-        self.tell("Deselected selection.")
+                repo = entry.repo
+                if repo.owner in staying_accounts:
+                    logger.info(f"Keeping {repo.owner}/{repo.name}: it is still backed up as part of the account")
+                    continue
 
-    def set_all_selected(self):
-        with self.config.batch():
-            for entry in self.iter_entries():
-                entry.set_pull(True)
+                # Current backup, then folders left behind by the old working-copy layout
+                for target in (repo.backup_path(loc_path), loc_path / repo.name, loc_path / f"backup-{repo.name}"):
+                    if target.exists():
+                        logger.info(f"Removing {target}")
+                        remove_dir(target)
+                tidy_owner_dir(repo.backup_path(loc_path).parent)
 
-        self.tell("Selected all.")
-
-    def set_all_deselected(self):
-        with self.config.batch():
-            for entry in self.iter_entries():
-                entry.set_pull(False)
-
-        self.tell("Deselected all.")
+    # ---------- Backup folder ----------
 
     def pick_backup_path(self):
         choice = QFileDialog.getExistingDirectory(self, "Select root folder", dir=str(self.repos_backup_path))
@@ -474,227 +515,218 @@ class GitDatBackUI(QWidget):
             self.backup_path_input.setText(choice)
             self.set_backup_path(choice)
         else:
-            logger.info(f"User aborted backup path selection.")
+            logger.info("User aborted backup path selection.")
 
     def set_backup_path(self, path: str | Path = None):
-        if path is not None:  # Use provided path as choice
-            choice = Path(path) if not isinstance(path, Path) else path
-            choice = choice.resolve()
-        else:  # Use path written in QLineEdit
-            choice = Path(self.backup_path_input.text()).resolve()
+        # Use the given path, or what is written in the text field
+        choice = Path(path if path is not None else self.backup_path_input.text()).resolve()
 
-        if choice:
-            self.backup_path_input.setText(str(choice))
-            self.config.settings.backup_root = str(choice)
-            logger.info(f"Backup path: {choice}")
+        self.backup_path_input.setText(str(choice))
+        self.config.settings.backup_root = str(choice)
+        logger.info(f"Backup path: {choice}")
 
     def tell(self, what: str):
         self.info_label.setText(what.strip())
 
+    # ---------- Pulling ----------
+
     def pull_repos(self):
-        self.set_buttons_state_while_task(False)
-
-        repos = []
-
-        for idx, entry in enumerate(self.iter_entries()):
-            is_checked = entry.get_pull()
-            url = entry.get_url()
-            repo = self.repos[idx]
-
-            logger.debug(f"{url=}")
-            logger.debug(f"{repo.name=}")
-            logger.debug(f"{is_checked=}")
-
-            if is_checked:
-                repos.append((repo, entry))
-                entry.set_status(entry.status_fetching)
-
-        if not repos:
+        rows = [entry for entry in self.entries if entry.get_pull()]
+        if not rows:
             self.tell("Nothing is checked.")
-            self.set_buttons_state_while_task(True)
             return
 
-        if not DRY_RUN:
-            self.tell(f"Backing up {len(repos)} repositories")
+        self.set_buttons_state_while_task(False)
+        self._run = BackupRun(self.repos_backup_path)
+        self._run_pending = 0
+        self._run_rows = {}
+
+        for entry in rows:
+            entry.set_status(EntryStatus.FETCHING)
+
+        # Single repositories first, so a repo that is also in an account is reported on its own row
+        for entry in rows:
+            if not entry.is_account:
+                self._queue_backup(entry.repo, entry)
+
+        # Accounts: list their repositories in the background, then queue them (see on_account_planned)
+        for entry in rows:
+            if entry.is_account:
+                account = self.config.account(entry.key)
+                task = FunctionTask(
+                    plan_account, entry.key, self._run.root, list(account.skipped), account.include_forks, context=entry
+                )
+                task.signals.succeeded.connect(self._on_account_task_done)
+                task.signals.failed.connect(self._on_account_task_failed)
+                self._run_pending += 1
+                self.thread_pool.start(task)
+
+        prefix = "[DRY_RUN] " if DRY_RUN else ""
+        self.tell(f"{prefix}Backing up {len(rows)} entries")
+
+    def _queue_backup(self, repo: Repository, entry: TableRepoEntry) -> bool:
+        """Queue one repository backup for a row. Returns False if it is already queued this run."""
+        if not self._run.claim(repo):
+            return False
+
+        self._run_rows[repo.url] = entry
+        self._run_pending += 1
+
+        task = BackupTask(repo, self._run.root)
+        task.signals.succeeded.connect(self._on_backup_task_done)
+        task.signals.failed.connect(self._on_backup_task_failed)
+        task.signals.progress.connect(self._on_backup_task_progress)
+        self.thread_pool.start(task)
+        return True
+
+    # Task results. Methods (not lambdas) so Qt delivers them on the main thread
+
+    def _on_account_task_done(self, task: FunctionTask, plan: AccountPlan):
+        self.on_account_planned(task.context, plan)
+
+    def _on_account_task_failed(self, task: FunctionTask, error: Exception):
+        # plan_account handles GitHub failures itself; this is a last resort so the run still finishes
+        entry = task.context
+        self.on_account_planned(entry, AccountPlan(entry.key, listing_error=f"Unexpected error: {error}"))
+
+    def _on_backup_task_done(self, task: BackupTask, _repo):
+        logger.info(f"Backup completed for: {task.repo.url}")
+        self._on_backup_result(task.repo.url, ok=True)
+
+    def _on_backup_task_failed(self, task: BackupTask, error: Exception):
+        self.tell(f"Error backing up {task.repo.url}: {error}")
+        self._on_backup_result(task.repo.url, ok=False, error_msg=str(error))
+
+    def _on_backup_task_progress(self, task: BackupTask, status: str):
+        entry = self._run_rows.get(task.repo.url)
+        if entry is not None and not entry.is_account:  # Account rows show their own progress
+            entry.set_status(status)
+
+    def on_account_planned(self, entry: TableRepoEntry, plan: AccountPlan):
+        self._run_pending -= 1
+
+        queued = sum(self._queue_backup(repo, entry) for repo in plan.repos)
+        progress = self._run.start_account(entry.key, plan, queued)
+
+        if plan.listing_error:
+            self.tell(f"{entry.key}: {plan.listing_error} Updating existing backups instead.")
+
+        self._show_account_progress(entry, progress)
+        self._finish_run_if_done()
+
+    def _on_backup_result(self, repo_url: str, ok: bool, error_msg: str = ""):
+        """One repository finished: update its row (or its account's row) and the run."""
+        self._run_pending -= 1
+        entry = self._run_rows.pop(repo_url, None)
+        progress = self._run.result(ok, entry.key if entry is not None and entry.is_account else None)
+
+        if progress is not None:
+            self._show_account_progress(entry, progress)
+        elif entry is not None and ok:
+            entry.set_timestamp_now()
+            entry.set_status(EntryStatus.DONE)
+            entry.set_branch_count(entry.repo.branch_count(self._run.root))
+            self.config.repo(entry.key).record_backup(self._run.root, when=entry.get_timestamp())
+        elif entry is not None:
+            entry.set_status(f"Error: {error_msg}")
+
+        self._finish_run_if_done()
+
+    def _show_account_progress(self, entry: TableRepoEntry, progress: AccountProgress):
+        """Status of an account row while its repositories are backed up, and its result once complete."""
+        if not progress.complete:
+            entry.set_status(f"Backing up {progress.finished}/{progress.total}")
+            return
+
+        plan = progress.plan
+        if progress.failed:
+            status = f"{progress.failed} of {progress.total} failed"
         else:
-            self.tell(f"[DRY_RUN] Backing up {len(repos)} repositories")
+            status = f"{EntryStatus.DONE} ({progress.total})"
+        if plan.listing_error:
+            status += ", GitHub unreachable"
+        if plan.gone:
+            status += f", {len(plan.gone)} gone upstream"
+        entry.set_status(status)
+        entry.status_label.setToolTip(plan.listing_error)
 
-        for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry)
-            logger.debug(f"Task {entry.get_url()}")
+        if not progress.failed:
+            entry.set_timestamp_now()
+        progress.record(self.config.account(entry.key), self._run.root, entry.get_timestamp())
+        self._update_account_summary(entry)
 
-            # Connect the signals
-            clone_task.signals.finished.connect(self.on_clone_success)
-            clone_task.signals.error.connect(self.on_clone_error)
-            clone_task.signals.status.connect(self.on_clone_status)
+    def _finish_run_if_done(self):
+        if self._run_pending > 0:
+            return
 
-            self.task_queue.add_task(clone_task)
+        if self._run.should_record_last_run():
+            self.config.settings.last_run = timestamp(TimestampFormat.LAST_RUN)
 
-        # self.set_buttons_state_while_task(True)
-
-    @staticmethod
-    def pull_repos_no_ui():
-        config = settings.get()
-        save_to = config.settings.backup_root_path()
-        logger.info(f"Backing up to root directory: {save_to}")
-
-        repos = [Repository(url) for url, repo_settings in config.settings.repos.items() if repo_settings.do_pull]
-        logger.info(f"Collected {len(repos)} repositories to back up")
-
-        def backup_and_record(repo: Repository):
-            if not repo.backup(save_to):
-                raise RuntimeError("Backup failed after all retries")
-
-            repo_settings = config.repo(repo.url)
-            with config.batch():
-                repo_settings.last_pulled = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-                repo_settings.add_location(save_to)
-            logger.info(f"Finished processing {repo.url}")
-
-        errors = 0
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS) as executor:
-            future_to_repo = {executor.submit(backup_and_record, repo): repo for repo in repos}
-
-            for future in as_completed(future_to_repo):
-                repo = future_to_repo[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Error pulling repository: {repo.url}: {e}")
-                    errors += 1
-
-        # If error margin is below 40%, we set timestamp
-        if errors < len(repos) * 0.4:
-            config.settings.last_run = get_current_timestamp()
-
-        config.save_if_dirty()
-        logger.info("Pull Repos No UI finished")
-
-    def set_button_state(self, button_widget: QPushButton, state: bool):
-        button_widget.setEnabled(state)
-
-    def set_buttons_state_while_task(self, state: bool):
-        logger.info(f"Set buttons state {state}")
-        self.set_button_state(self.submit_button, state)
-        self.set_button_state(self.set_selection_selected_button, state)
-        self.set_button_state(self.set_selection_deselected_button, state)
-        self.set_button_state(self.set_all_selected_button, state)
-        self.set_button_state(self.set_all_deselected_button, state)
-        self.set_button_state(self.remove_selected_button, state)
-        self.set_button_state(self.pick_backup_path_button, state)
-        self.set_button_state(self.service_options_button, state)
-        self.set_button_state(self.register_service_button, state)
-        self.set_button_state(self.unregister_service_button, state)
-        self.set_button_state(self.pull_button, state)
-
-    def on_clone_success(self, repo_url):
-        logger.info(f"Backup completed for: {repo_url}")
-
-        repo_settings = self.config.repo(repo_url)
-
-        for entry, repo in zip(self.entries, self.repos):
-            if entry.get_url() == repo_url:
-                entry.set_timestamp_now()
-                entry.set_status(entry.status_finished)
-                entry.set_branch_count(repo.branch_count(self.repos_backup_path))
-
-                with self.config.batch():
-                    repo_settings.last_pulled = entry.get_timestamp()
-                    repo_settings.add_location(self.repos_backup_path)
-
-        # Check if all done
-        if self.check_if_all_completed():
-            self.config.settings.last_run = get_current_timestamp()
-            self._on_all_clones_done()
-
-    def on_clone_status(self, repo_url: str, status: str):
-        for entry in self.iter_entries():
-            if entry.get_url() == repo_url:
-                entry.set_status(status)
-
-    def on_clone_error(self, repo_name, error_msg):
-        # logger.error(f"Error cloning repository {repo_name}: {error_msg}")
-        self.tell(f"Error backing up {repo_name}: {error_msg}")
-
-        for entry in self.iter_entries():
-            if entry.get_url() == repo_name:
-                entry.set_status(f"Error: {error_msg}")
-
-        # Check if all done
-        if self.check_if_all_completed():
-            self._on_all_clones_done()
-
-    def _on_all_clones_done(self):
         self.tell("Backup completed")
         self.set_buttons_state_while_task(True)
         # Save now so pull results survive a crash before the window closes
         self.save_state()
 
-    def check_if_all_completed(self):
-        missing = False
-        for entry in self.iter_entries():
-            if entry.get_pull() and entry.status_fetching.lower() in entry.get_status().lower():
-                missing = True
-                break
+    def set_buttons_state_while_task(self, state: bool):
+        logger.info(f"Set buttons state {state}")
+        for button in self._task_buttons:
+            button.setEnabled(state)
 
-        if not missing:
-            return True
+    def stop_tasks(self):
+        """Drop backups that haven't started yet. Running ones finish on their own."""
+        logger.info("Stopping background tasks")
+        self.thread_pool.clear()
 
-        return False
+    # ---------- Background service ----------
 
     def show_service_options_dialog(self):
         service_dialog = ServiceConfigWindow(self)
-        result = service_dialog.exec()
 
-        # Handle results
-        if result == QDialog.DialogCode.Accepted:
-            logger.info("Accepted new service settings")
-            sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
-            logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
-            with self.config.batch() as s:
-                s.schedule_type = sch_type
-                s.schedule_month = month
-                s.schedule_month_day = month_day
-                s.schedule_week_day = week_day
-                s.schedule_time = time
-        else:
+        if service_dialog.exec() != QDialog.DialogCode.Accepted:
             logger.info("Cancelled service settings")
+            return
+
+        sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
+        logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
+        with self.config.batch() as s:
+            s.schedule_type = sch_type
+            s.schedule_month = month
+            s.schedule_month_day = month_day
+            s.schedule_week_day = week_day
+            s.schedule_time = time
 
     def register_background_service(self):
         s = self.config.settings
-        schedule_type, month, month_day, week_day, time = (
-            s.schedule_type,
-            s.schedule_month,
-            s.schedule_month_day,
-            s.schedule_week_day,
-            s.schedule_time,
-        )
 
-        if week_day or time:
-            logger.info(f"Want to register service with custom schedule: {schedule_type} {week_day} - {time}")
+        if s.schedule_week_day or s.schedule_time:
+            logger.info(f"Register service with schedule: {s.schedule_type} {s.schedule_week_day} - {s.schedule_time}")
             success, status = systemd.register_service(
-                schedule_type=schedule_type, week_day=week_day, month=month, month_day=month_day, time=time
+                schedule_type=s.schedule_type,
+                week_day=s.schedule_week_day,
+                month=s.schedule_month,
+                month_day=s.schedule_month_day,
+                time=s.schedule_time,
             )
         else:
-            logger.info(f"Want to register service with default schedule")
+            logger.info("Register service with default schedule")
             success, status = systemd.register_service()
-        if success:
-            clipboard = self.app.clipboard()
-            clipboard.setText(status)
-            AlertDialog(
-                "Command copied to the clipboard. Please run it in your preferred Terminal application.",
-                title="Set Background Service",
-            )
+
+        self._offer_command(success, status)
 
     def unregister_background_service(self):
-        success, status = systemd.unregister_service()
-        if success:
-            clipboard = self.app.clipboard()
-            clipboard.setText(status)
-            AlertDialog(
-                "Command copied to the clipboard. Please run it in your preferred Terminal application.",
-                title="Set Background Service",
-            )
+        self._offer_command(*systemd.unregister_service())
+
+    def _offer_command(self, success: bool, command: str):
+        """Copy a terminal command for the user to run, and tell them."""
+        if not success:
+            return
+        self.app.clipboard().setText(command)
+        AlertDialog(
+            "Command copied to the clipboard. Please run it in your preferred Terminal application.",
+            title="Set Background Service",
+        )
+
+    # ---------- Window ----------
 
     def show(self):
         super().show()
@@ -703,10 +735,8 @@ class GitDatBackUI(QWidget):
 
     def closeEvent(self, event):
         logger.info("Application close.")
-        self.task_queue.stop()
-
+        self.stop_tasks()
         self.save_state()
-
         logger.info("Shutdown")
         event.accept()
 
@@ -718,14 +748,9 @@ class GitDatBackUI(QWidget):
         self.config.save_settings()
 
     def _adjust_app_size(self):
-        screen_info = get_screen_info(self.app)
+        width, height, scale = get_screen_info(self.app)
+        logger.debug(f"Screen: {width}x{height} @ {scale}")
 
-        logger.debug(f"{screen_info=}")
-
-        if not self:
-            logger.warning("Not self")
-            return
-
-        if screen_info[0] <= 2000 or screen_info[1] <= 1200 or screen_info[2] <= 0.7:
+        if width <= 2000 or height <= 1200 or scale <= 0.7:
             logger.info("Resizing application")
             self.resize(QSize(650, 500))

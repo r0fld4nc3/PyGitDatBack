@@ -1,37 +1,83 @@
-from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QCheckBox, QLabel
-)
-from PySide6.QtCore import QDateTime, Qt
-
 import logging
+from enum import IntEnum, StrEnum
 
-from . import AlignedWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
+
+from defines import EntryKind
+from utils import TimestampFormat, timestamp
+
+from .aligned_widget import AlignedWidget
 
 logger = logging.getLogger(__name__)
 
 
+class Column(IntEnum):
+    """Columns of the main table, in display order."""
+
+    PULL = 0
+    URL = 1
+    BRANCHES = 2
+    LAST_PULLED = 3
+    STATUS = 4
+
+    @property
+    def header(self) -> str:
+        return _COLUMN_LAYOUT[self][0]
+
+    @property
+    def width(self) -> int:
+        return _COLUMN_LAYOUT[self][1]
+
+
+# Header text and starting width of each column
+_COLUMN_LAYOUT = {
+    Column.PULL: ("Pull", 40),
+    Column.URL: ("URL", 400),
+    Column.BRANCHES: ("Branches", 150),
+    Column.LAST_PULLED: ("Last Pulled", 175),
+    Column.STATUS: ("Status", 100),
+}
+
+
+class EntryStatus(StrEnum):
+    """Fixed texts of the Status column. Progress and errors are formatted on top of these."""
+
+    FETCHING = "Fetching..."
+    DONE = "Done"
+
+
 class TableRepoEntry(QWidget):
-    def __init__(self, url: str):
+    """
+    One row of the main table: a single repository, or a whole GitHub account.
+
+    * `kind`: `EntryKind.REPO` or `EntryKind.ACCOUNT`
+    * `key`: the settings key. The URL for a repository, the owner name for an account.
+    * `repo`: the `Repository` for repository rows, `None` for accounts.
+    """
+
+    def __init__(self, url: str, kind: EntryKind = EntryKind.REPO, key: str = "", repo=None):
         super().__init__()
+
+        self.kind = kind
+        self.key = key or url.strip()
+        self.repo = repo
+        self._url = url.strip()
 
         self.pull_checkbox = QCheckBox()
         self.pull_checkbox_widget = AlignedWidget(self.pull_checkbox)
-        self.pull_checkbox.setChecked(True) # Default pull to true
+        self.pull_checkbox.setChecked(True)  # Default pull to true
 
-        
-        self.url_label = QLabel(url.strip())
-        self.url_label_widget = AlignedWidget(self.url_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
+        self.url_label = QLabel(self._display_text())
 
         self.branches_label = QLabel("-")
         self.branches_label_widget = AlignedWidget(self.branches_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
-        
+
         self.timestamp_label = QLabel("n/a")
         self.timestamp_widget = AlignedWidget(self.timestamp_label)
 
         self.status_label = QLabel()
         self.status_widget = AlignedWidget(self.status_label)
-        self.status_fetching = "Fetching..."
-        self.status_finished = "Done"
 
         layout = QHBoxLayout()
         layout.addWidget(self.pull_checkbox_widget)
@@ -44,61 +90,71 @@ class TableRepoEntry(QWidget):
 
         self.setLayout(layout)
 
+    def cell_widgets(self) -> dict[Column, QWidget]:
+        """The widget shown in each table column for this row."""
+        return {
+            Column.PULL: self.pull_checkbox_widget,
+            Column.URL: self.url_label,
+            Column.BRANCHES: self.branches_label_widget,
+            Column.LAST_PULLED: self.timestamp_widget,
+            Column.STATUS: self.status_widget,
+        }
+
+    @property
+    def is_account(self) -> bool:
+        return self.kind == EntryKind.ACCOUNT
+
+    def _display_text(self) -> str:
+        return f"{self._url}  (account)" if self.is_account else self._url
+
+    # ---------- Pull checkbox ----------
+
     def get_pull(self) -> bool:
         return self.pull_checkbox.isChecked()
 
     def set_pull(self, state: bool):
         self.pull_checkbox.setChecked(state)
 
-    def get_timestamp(self) -> str:
-        return self.timestamp_label.text()
-
-    def set_timestamp_now(self):
-        """Sets the current timestamp on the timestamp_item."""
-        _timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        self.timestamp_label.setText(_timestamp)
-        logger.info(f"Set timestamp {_timestamp} of entry {self.get_url()}")
+    # ---------- URL ----------
 
     def get_url(self) -> str:
-        return self.url_label.text()
+        return self._url
 
     def set_url(self, url: str):
-        former_url = self.url_label.text()
-        self.url_label.setText(url)
+        former_url = self._url
+        self._url = url.strip()
+        if not self.is_account:
+            self.key = self._url
+        self.url_label.setText(self._display_text())
         logger.info(f"Set new URL: {url} for former {former_url}")
+
+    # ---------- Last pulled ----------
 
     def get_timestamp(self) -> str:
         return self.timestamp_label.text()
 
-    def set_timestamp(self, timestamp: str):
-        """Sets the timestamp on the timestamp_item."""
-        self.timestamp_label.setText(timestamp)
-        logger.info(f"Set timestamp '{timestamp}' of widget {self.timestamp_label} [{self.get_url()}]")
+    def set_timestamp(self, value: str):
+        self.timestamp_label.setText(value)
+        logger.info(f"Set timestamp '{value}' [{self.get_url()}]")
+
+    def set_timestamp_now(self):
+        self.set_timestamp(timestamp(TimestampFormat.PULLED))
+
+    # ---------- Status ----------
 
     def get_status(self) -> str:
         return self.status_label.text()
 
     def set_status(self, status: str):
-        """Sets the status on the status_item."""
         self.status_label.setText(status)
-        logger.info(f"Set status '{status}' of widget {self.status_label} [{self.get_url()}]")
+        logger.info(f"Set status '{status}' [{self.get_url()}]")
+
+    # ---------- Branches ----------
 
     def set_branch_count(self, count: int):
         """Show how many branches the local backup holds. `0` shows a dash: no backup yet."""
         self.branches_label.setText(str(count) if count else "-")
 
-    def props(self) -> dict:
-        """Returns the properties that comprise the entry for a saveable format
-
-        * `do_pull` Checked state of the checkbox. `True` if checkbox is checked, `False` otherwise
-        * `url` URL string
-        * `ts` Timestamp string
-        """
-
-        ret = {
-            "do_pull": self.get_pull(),
-            "url": self.get_url(),
-            "ts": self.get_timestamp()
-        }
-
-        return ret
+    def set_branches_text(self, text: str):
+        """Free text for the Branches column, used by account rows (ex.: "12 repos")."""
+        self.branches_label.setText(text or "-")

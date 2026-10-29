@@ -28,10 +28,10 @@ from dataclasses import MISSING, fields
 from pathlib import Path
 from typing import Generator, Optional
 
-from defines import APP_NAME, HOST
+from defines import APP_NAME, HOST, EntryKind
 from utils import get_os_env_config_folder
 
-from .models import AppSettings, RepoSettings
+from .models import AccountSettings, AppSettings, BackupTargetSettings, RepoSettings
 
 log = logging.getLogger(__name__)
 
@@ -170,17 +170,19 @@ class SettingsManager:
         """Build AppSettings from a dict, one field at a time. A bad value only resets that field."""
         settings = _dataclass_from_dict(AppSettings, data)
 
-        repos_data = data.get("repos", {})
-        if not isinstance(repos_data, dict):
-            log.warning(f"Ignoring invalid 'repos' value in settings: {repos_data!r}")
-            repos_data = {}
+        for name, item_cls in _COLLECTIONS.values():
+            items = data.get(name, {})
+            if not isinstance(items, dict):
+                log.warning(f"Ignoring invalid '{name}' value in settings: {items!r}")
+                items = {}
 
-        for url, repo_data in repos_data.items():
-            url = url.strip() if isinstance(url, str) else ""
-            if not url or not isinstance(repo_data, dict):
-                log.warning(f"Skipping invalid repository entry '{url}': {repo_data!r}")
-                continue
-            settings.repos[url] = self._attach(_dataclass_from_dict(RepoSettings, repo_data))
+            collection = getattr(settings, name)
+            for key, item_data in items.items():
+                key = key.strip() if isinstance(key, str) else ""
+                if not key or not isinstance(item_data, dict):
+                    log.warning(f"Skipping invalid '{name}' entry '{key}': {item_data!r}")
+                    continue
+                collection[key] = self._attach(_dataclass_from_dict(item_cls, item_data))
 
         return self._attach(settings)
 
@@ -227,7 +229,8 @@ class SettingsManager:
     def _to_dict(self) -> dict:
         """Turn settings into a plain dict for JSON. Call while holding the lock."""
         data = _dataclass_to_dict(self.settings)
-        data["repos"] = {url: _dataclass_to_dict(repo) for url, repo in self.settings.repos.items()}
+        for name in _COLLECTION_FIELDS:
+            data[name] = {key: _dataclass_to_dict(item) for key, item in getattr(self.settings, name).items()}
         return data
 
     def _write_text_atomic(self, fp: Path, text: str) -> bool:
@@ -320,31 +323,52 @@ class SettingsManager:
             self.save_settings()
             log.info("Restored settings from snapshot.")
 
-    # ---------- Repositories ----------
+    # ---------- Entries (repositories and accounts) ----------
 
-    def repo(self, url: str) -> RepoSettings:
-        """Get the settings for a repository, adding it (and saving) if it isn't stored yet."""
-        url = url.strip()
-        if not url:
-            # Never store an entry without a URL. Hand back a detached object so callers don't crash.
-            log.warning("Requested repository settings with an empty URL; not saving it.")
-            return RepoSettings()
+    def entry(self, kind: EntryKind, key: str) -> BackupTargetSettings:
+        """Settings of a repository (key = URL) or account (key = owner), added and saved if new."""
+        key = key.strip()
+        _, item_cls = _COLLECTIONS[kind]
+        if not key:
+            # Never store an entry without a key. Hand back a detached object so callers don't crash.
+            log.warning(f"Requested {item_cls.__name__} with an empty key; not saving it.")
+            return item_cls()
 
         with self.lock:
-            if url not in self.settings.repos:
-                self.settings.repos[url] = self._attach(RepoSettings())
+            collection = self._collection(kind)
+            if key not in collection:
+                collection[key] = self._attach(item_cls())
                 self._on_change(save_now=True)
-            return self.settings.repos[url]
+            return collection[key]
 
-    def has_repo(self, url: str) -> bool:
-        return url.strip() in self.settings.repos
+    def find(self, kind: EntryKind, key: str) -> Optional[BackupTargetSettings]:
+        """Settings of an entry, or None if it isn't stored. Never adds anything."""
+        return self._collection(kind).get(key.strip())
 
-    def remove_repo(self, url: str) -> bool:
+    def has(self, kind: EntryKind, key: str) -> bool:
+        return self.find(kind, key) is not None
+
+    def remove(self, kind: EntryKind, key: str) -> bool:
         with self.lock:
-            if self.settings.repos.pop(url.strip(), None) is None:
+            if self._collection(kind).pop(key.strip(), None) is None:
                 return False
             self._on_change(save_now=True)
             return True
+
+    def _collection(self, kind: EntryKind) -> dict:
+        field_name, _ = _COLLECTIONS[kind]
+        return getattr(self.settings, field_name)
+
+    # ---------- Typed shortcuts ----------
+
+    def repo(self, url: str) -> RepoSettings:
+        return self.entry(EntryKind.REPO, url)
+
+    def has_repo(self, url: str) -> bool:
+        return self.has(EntryKind.REPO, url)
+
+    def remove_repo(self, url: str) -> bool:
+        return self.remove(EntryKind.REPO, url)
 
     def rename_repo(self, old_url: str, new_url: str) -> RepoSettings:
         """Move a repository's settings to a new URL, keeping its order in the list."""
@@ -359,6 +383,15 @@ class SettingsManager:
             }
             return self.settings.repos[new_url]
 
+    def account(self, owner: str) -> AccountSettings:
+        return self.entry(EntryKind.ACCOUNT, owner)
+
+    def has_account(self, owner: str) -> bool:
+        return self.has(EntryKind.ACCOUNT, owner)
+
+    def remove_account(self, owner: str) -> bool:
+        return self.remove(EntryKind.ACCOUNT, owner)
+
     def _attach(self, obj):
         """Link a settings object to this manager so changes to it get saved."""
         obj._manager = self
@@ -366,6 +399,13 @@ class SettingsManager:
 
 
 # ---------- Dataclass <-> dict helpers ----------
+
+# AppSettings fields holding `{key: settings object}`, and the class of their items
+_COLLECTIONS = {
+    EntryKind.REPO: ("repos", RepoSettings),
+    EntryKind.ACCOUNT: ("accounts", AccountSettings),
+}
+_COLLECTION_FIELDS = {name for name, _ in _COLLECTIONS.values()}
 
 
 def _dataclass_from_dict(cls, data: dict):
@@ -382,8 +422,8 @@ def _dataclass_from_dict(cls, data: dict):
             continue
         known.add(f.name)
 
-        if f.name == "repos" or f.name not in data:
-            continue  # repos are handled by the caller
+        if f.name in _COLLECTION_FIELDS or f.name not in data:
+            continue  # Collections are handled by the caller
 
         if cls._is_locked_field(f.name):
             continue
@@ -405,7 +445,7 @@ def _dataclass_to_dict(obj) -> dict:
     """Public fields of a settings dataclass, plus any unknown keys we read from the file."""
     data = dict(obj._unknown)
     for f in fields(obj):
-        if not f.name.startswith("_") and f.name != "repos":
+        if not f.name.startswith("_") and f.name not in _COLLECTION_FIELDS:
             value = getattr(obj, f.name)
             data[f.name] = list(value) if isinstance(value, list) else value
     return data

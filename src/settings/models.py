@@ -24,11 +24,12 @@ Not in place:
 Only assignments are noticed and saved.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from defines import APP_NAME, HOST, VERSION
+from defines import APP_NAME, APP_VERSION_STR, HOST
 from utils import get_home_folder
 
 if TYPE_CHECKING:
@@ -37,7 +38,6 @@ if TYPE_CHECKING:
 _MEMORY = "MEMORY"
 _LOCKED = "LOCKED"
 
-APP_VERSION_STR = ".".join(str(part) for part in VERSION)
 DEFAULT_BACKUP_ROOT = get_home_folder() / HOST / APP_NAME / "Repositories"
 
 
@@ -94,18 +94,49 @@ class AutoSaveHookedSettingsClass:
 
 
 @dataclass
-class RepoSettings(AutoSaveHookedSettingsClass):
-    """One backed-up repository. Stored in `AppSettings.repos` under its URL."""
+class BackupTargetSettings(AutoSaveHookedSettingsClass):
+    """Settings shared by everything the app backs up: single repositories and whole accounts."""
 
     do_pull: bool = True
     last_pulled: str = ""
-    # Every backup root this repo was backed up to, so "Remove from disk" can find all copies
+    # Every backup root this was backed up to, so "Remove from disk" can find all copies
     locations: list[str] = field(default_factory=list)
 
     def add_location(self, path) -> None:
         path = str(path)
         if path not in self.locations:
             self.locations = [*self.locations, path]
+
+    def record_backup(self, root=None, when: str = "") -> None:
+        """
+        Record a backup run with a single settings write.
+
+        root: backup root it was written to, added to `locations`. None when nothing was written.
+        when: new `last_pulled`. Empty to leave it unchanged (ex.: some repositories failed).
+        """
+        manager = self._manager
+        with manager.batch() if manager else nullcontext():
+            if root is not None:
+                self.add_location(root)
+            if when:
+                self.last_pulled = when
+
+
+@dataclass
+class RepoSettings(BackupTargetSettings):
+    """One backed-up repository. Stored in `AppSettings.repos` under its URL."""
+
+
+@dataclass
+class AccountSettings(BackupTargetSettings):
+    """
+    A whole GitHub account. Stored in `AppSettings.accounts` under the owner name.
+
+    Stores the repositories to *skip*, not the ones to include, so repositories the account creates later are backed up automatically.
+    """
+
+    include_forks: bool = False
+    skipped: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -125,10 +156,12 @@ class AppSettings(AutoSaveHookedSettingsClass):
     schedule_time: str = ""
     last_run: str = ""
     repos: dict[str, RepoSettings] = field(default_factory=dict)
+    accounts: dict[str, AccountSettings] = field(default_factory=dict)
 
     # --- Kept in memory ---
     window_width: int = memory(810)
     window_height: int = memory(450)
+    max_concurrent_tasks: int = memory(20)  # Backups running at the same time
 
     def backup_root_path(self) -> Path:
         """Where backups go: the chosen folder, or the default when none is set."""

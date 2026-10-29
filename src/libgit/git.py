@@ -5,29 +5,28 @@ import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple, Union
-from urllib.parse import urlparse
+from typing import Union
 
 import git
 
+from defines import EntryKind
+
+from .github import github_url, parse_github_url
+
 logger = logging.getLogger(__name__)
 
-ACCEPTED_DOMAINS = ("github.com",)
-
-# Upstream branches and tags are fetched into a staging area first, never straight over
-# the backup's own refs. Only branches and tags: a plain `--mirror` would also pull
+# Upstream branches and tags are fetched into a staging area first, never straight over the backup's own refs.
+# Only branches and tags: a plain `--mirror` would also pull
 # GitHub's refs/pull/* (every pull request ever opened), which can be very large.
 STAGING_PREFIX = "refs/staging/"
 STAGING_REFSPECS = ("+refs/heads/*:refs/staging/heads/*", "+refs/tags/*:refs/staging/tags/*")
 
-# When upstream rewrites a branch or moves a tag (force-push, history rewrite), the
-# backup's previous version is kept here, so those commits are never lost:
+# When upstream rewrites a branch or moves a tag (force-push, history rewrite), the backup's previous version is kept here, so those commits are never lost:
 #   refs/preserved/<UTC timestamp>/heads/<branch>
 #   refs/preserved/<UTC timestamp>/tags/<tag>
 PRESERVED_PREFIX = "refs/preserved/"
 
-# Never let git stop and wait for a username/password. A private or missing repo
-# would otherwise hang the background service forever.
+# Never let git stop and wait for a username/password. A private or missing repo would otherwise hang the background service forever.
 GIT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 
 
@@ -35,8 +34,9 @@ class Repository:
     """
     A GitHub repository and its local backup.
 
-    The backup is a bare clone holding every branch and tag, stored at
-    `<root>/<owner>/<name>.git`. Each run fetches new commits into it.
+    The backup is a bare clone holding every branch and tag, stored at `<root>/<owner>/<name>.git`.
+
+    Each run fetches new commits into it.
 
     Nothing already backed up is ever dropped:
     * Branches and tags deleted upstream are kept.
@@ -44,14 +44,23 @@ class Repository:
     """
 
     def __init__(self, url: str):
+        target = parse_github_url(url)
+        if target is None or target.kind != EntryKind.REPO:
+            raise ValueError(f"Not a GitHub repository URL: {url!r}")
+
         self.url: str = url.strip()
-        self.owner, self.name = parse_owner_name_from_url(self.url)
+        self.owner = target.owner
+        self.name = target.name
 
         self.max_retries = 3
         self.retry_delay = 30  # seconds
 
+    @classmethod
+    def of(cls, owner: str, name: str) -> "Repository":
+        return cls(github_url(owner, name))
+
     def backup_path(self, root: Union[Path, str]) -> Path:
-        return Path(root).expanduser().resolve() / self.owner / f"{self.name}.git"
+        return owner_backup_dir(root, self.owner) / f"{self.name}.git"
 
     def has_backup(self, root: Union[Path, str]) -> bool:
         return (self.backup_path(root) / "HEAD").is_file()
@@ -96,8 +105,7 @@ class Repository:
         return False
 
     def _clone(self, dest: Path):
-        # Clone next to the final folder and rename once complete, so an interrupted
-        # clone never leaves a half-made backup that later runs would try to update
+        # Clone next to the final folder and rename once complete, so an interrupted clone never leaves a half-made backup that later runs would try to update
         partial = dest.with_name(dest.name + ".partial")
         if partial.exists():
             remove_dir(partial)
@@ -126,7 +134,9 @@ class Repository:
 
             preserved = self._apply_staged_refs(repo)
             if preserved:
-                logger.warning(f"[{self.name}] Upstream rewrote history. Kept {preserved} old version(s) under {PRESERVED_PREFIX}")
+                logger.warning(
+                    f"[{self.name}] Upstream rewrote history. Kept {preserved} old version(s) under {PRESERVED_PREFIX}"
+                )
         finally:
             repo.close()
 
@@ -178,7 +188,7 @@ def _is_ancestor(repo: git.Repo, old: str, new: str) -> bool:
         repo.git.merge_base("--is-ancestor", old, new)
         return True
     except git.GitCommandError:
-        # Not an ancestor, or not comparable (e.g. a tag on a non-commit): treat as a rewrite and keep it
+        # Not an ancestor, or not comparable (ex.: a tag on a non-commit): treat as a rewrite and keep it
         return False
 
 
@@ -208,36 +218,20 @@ def _rmtree_on_error(func, path, exc):
         raise exc
 
 
-def parse_owner_name_from_url(url: str) -> Tuple[str, str]:
-    owner: str = ""
-    name: str = ""
-
-    parsed = urlparse(url.strip())
-    _path_split = [i for i in parsed.path.split("/") if i]  # Also remove empty values
-
-    if len(_path_split) > 1:
-        owner = _path_split[0]
-        name = _path_split[1].removesuffix(".git")
-
-    logger.debug(f"Parsed {url}: {owner=} {name=}")
-
-    return owner, name
+# ---------- Backup layout on disk: <root>/<owner>/<name>.git ----------
 
 
-def validate_github_url(url: str) -> bool:
-    """
-    Checks the URL is a GitHub repository URL (`https://github.com/<owner>/<name>`).
-    It does not check the repository exists. A missing repo fails when it is backed up.
-    """
-    parsed = urlparse(url.strip())
-    owner, name = parse_owner_name_from_url(url)
+def owner_backup_dir(root: Union[Path, str], owner: str) -> Path:
+    """Folder holding every backup of one owner."""
+    return Path(root).expanduser().resolve() / owner
 
-    if parsed.netloc.lower() not in ACCEPTED_DOMAINS:
-        logger.info(f"{parsed.netloc} is not a valid {ACCEPTED_DOMAINS} domain.")
-        return False
 
-    if not owner or not name:
-        logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
-        return False
-
-    return True
+def existing_backups(root: Union[Path, str], owner: str) -> list[str]:
+    """Names of the repositories already backed up for `owner` under `root`."""
+    owner_dir = owner_backup_dir(root, owner)
+    if not owner_dir.is_dir():
+        return []
+    return sorted(
+        (p.name.removesuffix(".git") for p in owner_dir.glob("*.git") if (p / "HEAD").is_file()),
+        key=str.lower,
+    )

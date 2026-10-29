@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from PySide6.QtWidgets import QApplication
 
@@ -25,17 +24,3 @@ def get_screen_info(app: QApplication) -> tuple:
     logger.debug(f"{scale_f=}")
 
     return width, height, scale_f
-
-
-def get_current_timestamp() -> str:
-    fmt = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    return fmt
-
-
-def to_datetime(ts: str) -> datetime:
-    try:
-        date = datetime.strptime(ts, "%d-%m-%Y %H:%M:%S")
-    except ValueError:
-        date = datetime.strptime(get_current_timestamp(), "%d-%m-%Y %H:%M:%S")
-
-    return date

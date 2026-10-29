@@ -2,6 +2,7 @@ import argparse
 import logging
 
 import settings
+from backups import run_headless
 from log import LOG_FILE, configure_logging, reset_log_file
 from ui import GitDatBackUI
 
@@ -39,7 +40,7 @@ def launch_ui() -> bool:
 
 def launch_no_ui() -> bool:
     logger.info("Launching no GUI")
-    GitDatBackUI.pull_repos_no_ui()
+    run_headless()
     logger.info("Finished. Exiting.")
 
 

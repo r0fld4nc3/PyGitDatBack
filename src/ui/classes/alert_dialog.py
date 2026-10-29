@@ -1,14 +1,13 @@
-from PySide6.QtWidgets import (
-    QVBoxLayout, QDialog, QDialogButtonBox, QTextEdit
-)
-from PySide6.QtCore import QSize, Qt
-
 import logging
+
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextEdit, QVBoxLayout
 
 logger = logging.getLogger(__name__)
 
+
 class AlertDialog(QDialog):
-    def __init__(self, alert: str, title: str="Alert"):
+    def __init__(self, alert: str, title: str = "Alert"):
         super().__init__()
 
         self.alert_text = alert
@@ -18,16 +17,14 @@ class AlertDialog(QDialog):
 
         self.resize(QSize(400, 200))
 
-        QBtn = (
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+        QBtn = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
 
         self.button_box = QDialogButtonBox(QBtn)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
-        
+
         self.message_box = QTextEdit(self.alert_text)
         self.message_box.setEnabled(False)
         self.message_box.setAlignment(Qt.AlignCenter)

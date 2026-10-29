@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
@@ -11,10 +12,10 @@ log = logging.getLogger(__name__)
 # --- OS Detection ---
 
 
-class OS_TYPE:
-    WINDOWS: str = "Windows"
-    LINUX: str = "Linux"
-    DARWIN: str = "Darwin"
+class OSType(StrEnum):
+    WINDOWS = "Windows"
+    LINUX = "Linux"
+    DARWIN = "Darwin"
 
 
 @lru_cache(maxsize=1)
@@ -23,15 +24,15 @@ def system() -> str:
 
 
 def os_linux() -> bool:
-    return system() == OS_TYPE.LINUX
+    return system() == OSType.LINUX
 
 
 def os_darwin() -> bool:
-    return system() == OS_TYPE.DARWIN
+    return system() == OSType.DARWIN
 
 
 def os_windows() -> bool:
-    return system() == OS_TYPE.WINDOWS
+    return system() == OSType.WINDOWS
 
 
 # ---------- Core Paths ----------

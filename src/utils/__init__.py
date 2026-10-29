@@ -1,6 +1,6 @@
 from .clipboard import send_to_clipboard
 from .path_helpers import (
-    OS_TYPE,
+    OSType,
     ensure_dir,
     get_appdata_folder,
     get_documents_folder,
@@ -20,3 +20,4 @@ from .path_helpers import (
     windows_appdata,
     windows_localappdata,
 )
+from .timestamps import TimestampFormat, timestamp
