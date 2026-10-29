@@ -49,7 +49,6 @@ from .classes import (
     ServiceConfigWindow,
     TableRepoEntry,
 )
-from .utils import get_screen_info
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ class GitDatBackUI(QWidget):
         self.config = settings.get()
 
         self.setWindowTitle(f"{APP_NAME} ({self.APP_VERSION_STR})")
-        self.resize(QSize(self.config.settings.window_width, self.config.settings.window_height))
+        self.resize(self._saved_size())
 
         # Background work, at most `max_concurrent_tasks` at a time
         self.thread_pool = QThreadPool()
@@ -743,7 +742,7 @@ class GitDatBackUI(QWidget):
 
     def show(self):
         super().show()
-        self._adjust_app_size()
+        self._center_on_screen()  # After show(), when the title bar size is known
         sys.exit(self.app.exec())
 
     def closeEvent(self, event):
@@ -754,16 +753,29 @@ class GitDatBackUI(QWidget):
         event.accept()
 
     def save_state(self):
-        """Store the window size and write any settings not yet on disk."""
-        self.config.settings.window_width = self.frameGeometry().width()
-        self.config.settings.window_height = self.frameGeometry().height() - 36
+        """Store the window size and write to disk."""
+        # The size inside the frame, the same thing resize() sets, so it comes back exactly the same.
+        # When maximised, keep the size it returns to rather than the whole screen.
+        size = self.normalGeometry().size() if self.isMaximized() or self.isFullScreen() else self.size()
+        self.config.settings.window_width = size.width()
+        self.config.settings.window_height = size.height()
 
         self.config.save_settings()
 
-    def _adjust_app_size(self):
-        width, height, scale = get_screen_info(self.app)
-        logger.debug(f"Screen: {width}x{height} @ {scale}")
+    def _screen_area(self):
+        """Usable area of the screen the window is on (without taskbar or menu bar)."""
+        return (self.screen() or self.app.primaryScreen()).availableGeometry()
 
-        if width <= 2000 or height <= 1200 or scale <= 0.7:
-            logger.info("Resizing application")
-            self.resize(QSize(650, 500))
+    def _saved_size(self) -> QSize:
+        """The saved window size, shrunk to fit if the screen is smaller than when it was saved."""
+        area = self._screen_area()
+        return QSize(
+            min(self.config.settings.window_width, area.width()),
+            min(self.config.settings.window_height, area.height()),
+        )
+
+    def _center_on_screen(self):
+        """Place the whole window, title bar included, in the middle of its screen."""
+        frame = self.frameGeometry()
+        frame.moveCenter(self._screen_area().center())
+        self.move(frame.topLeft())
