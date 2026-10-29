@@ -1,16 +1,26 @@
-from PySide6.QtCore import QRunnable
-from time import sleep
+import logging
 import secrets
+from time import sleep
 
+from PySide6.QtCore import QRunnable
+
+from conf_globals import DRY_RUN
 from libgit import Repository
+
 from .table_entry_repos import TableRepoEntry
 from .worker_signals import WorkerSignals
-from conf_globals import DRY_RUN
-import logging
 
 logger = logging.getLogger(__name__)
 
+
 class CloneRepoTask(QRunnable):
+    """
+    Clones or updates one repository on a worker thread.
+
+    Never touch Qt widgets from `run()`.
+    Report through `self.signals` for UI updates on main thread.
+    """
+
     def __init__(self, repo, path, entry, collect_branches: bool = False):
         super().__init__()
         self.repo: Repository = repo
@@ -25,13 +35,14 @@ class CloneRepoTask(QRunnable):
             if not DRY_RUN:
                 logger.info(f"Cloning repository {self.repo.url} into {self.path}")
                 self.repo.clone_from(self.path, collect_branches=self.collect_branches)
-                self.entry.set_branches_label_text(f"{len(self.entry.get_branches())} ({len(self.repo.active_branches_str)})")
+                if not self.repo.last_clone_ok:
+                    raise RuntimeError("Clone or update failed after all retries")
             else:
                 logger.info(f"Dry run repository {self.repo.url} into {self.path}")
-                
+
                 _sleep = secrets.choice(range(1, 11))
                 logger.debug(f"[{self.repo.url}] Sleeping for {_sleep}")
-                self.entry.set_status(f"{self.entry.status_fetching} ({_sleep})")
+                self.signals.status.emit(self.repo.url, f"{self.entry.status_fetching} ({_sleep})")
 
                 if _sleep == 7:
                     raise Exception("Test exception, hit 7")

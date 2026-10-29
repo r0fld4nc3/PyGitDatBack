@@ -16,11 +16,14 @@ if sudo systemctl stop "$(basename "$TIMER_FILE")"; then
     exit 1
 fi
 
-# Disable the service
-if sudo systemctl stop "$(basename "$SERVICE_FILE")"; then
-    echo "Disabled $(basename "$SERVICE_FILE")"
+# Stop the service, in case a run is in progress (not an error if it isn't running)
+sudo systemctl stop "$SERVICE_FILE" || true
+
+# Disable both units so systemd removes their enable symlinks
+if sudo systemctl disable "$TIMER_FILE" "$SERVICE_FILE"; then
+    echo "Disabled $TIMER_FILE and $SERVICE_FILE"
 else
-    echo "Error: Failed to disable $SERVICE_FILE"
+    echo "Error: Failed to disable $TIMER_FILE and $SERVICE_FILE"
     exit 1
 fi
 
