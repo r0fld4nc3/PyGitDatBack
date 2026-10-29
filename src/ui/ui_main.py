@@ -96,7 +96,10 @@ class GitDatBackUI(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout()
-        main_layout.addLayout(self._build_settings_row())
+        # Settings layout/row
+        # main_layout.addLayout(self._build_settings_row())
+
+        # Add url row
         main_layout.addLayout(self._build_input_row())
 
         self.info_label = QLabel()
@@ -153,7 +156,8 @@ class GitDatBackUI(QWidget):
             "Repository URL, or account URL (https://github.com/<user>/) for all its repositories"
         )
         self.submit_button = self._button("Add", self.add_entry)
-        return self._row([self.url_input, self.submit_button])
+        self.settings_button = self._build_settings_button()
+        return self._row([self.url_input, self.submit_button, self.settings_button])
 
     def _build_table_actions_buttons_row(self) -> QHBoxLayout:
         self.set_selection_selected_button = self._button(
@@ -204,20 +208,25 @@ class GitDatBackUI(QWidget):
         layout.addLayout(self._row([self.backup_path_input, self.pick_backup_path_button]))
         return layout
 
-    def _build_settings_row(self) -> QHBoxLayout:
+    def _build_settings_button(self) -> QToolButton:
         # Tool button: Qt's widget for icon buttons. Fixed size keeps it square whatever the window does.
-        self.settings_button = QToolButton()
-        self.settings_button.setFixedSize(SETTINGS_BUTTON_SIZE, SETTINGS_BUTTON_SIZE)
-        self.settings_button.setToolTip("Settings")
-        self.settings_button.clicked.connect(self.open_settings_dialog)
+        settings_button = QToolButton()
+        settings_button.setFixedSize(SETTINGS_BUTTON_SIZE, SETTINGS_BUTTON_SIZE)
+        settings_button.setToolTip("Settings")
+        settings_button.clicked.connect(self.open_settings_dialog)
 
         # Placeholder until there is an image.
-        #   self.settings_button.setIcon(QIcon("<path to icon>"))
-        #   self.settings_button.setIconSize(QSize(SETTINGS_ICON_SIZE, SETTINGS_ICON_SIZE))
-        self.settings_button.setText("⚙")
-        font = self.settings_button.font()
+        #   settings_button.setIcon(QIcon("<path to icon>"))
+        #   settings_button.setIconSize(QSize(SETTINGS_ICON_SIZE, SETTINGS_ICON_SIZE))
+        settings_button.setText("⚙")
+        font = settings_button.font()
         font.setPointSize(16)
-        self.settings_button.setFont(font)
+        settings_button.setFont(font)
+
+        return settings_button
+
+    def _build_settings_row(self) -> QHBoxLayout:
+        self.settings_button = self._build_settings_button()
 
         # The stretch takes all free space on the left, pinning the button to the window's right edge
         layout = QHBoxLayout()
