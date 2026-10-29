@@ -45,6 +45,7 @@ from .classes import (
     EntryStatus,
     FunctionTask,
     RepoPickerDialog,
+    RepoSettingsDialog,
     ServiceConfigWindow,
     TableRepoEntry,
 )
@@ -235,8 +236,8 @@ class GitDatBackUI(QWidget):
         return layout
 
     def open_settings_dialog(self):
-        # TODO: dialog for editable settings (max concurrent tasks, ...)
-        logger.info("Settings dialog not implemented yet")
+        dialog = RepoSettingsDialog(self)
+        dialog.exec()
 
     @staticmethod
     def _button(text: str, slot: Callable, fixed: bool = False) -> QPushButton:
