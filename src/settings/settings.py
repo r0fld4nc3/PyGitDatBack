@@ -355,6 +355,37 @@ class SettingsManager:
             self._on_change(save_now=True)
             return True
 
+    def rename(self, kind: EntryKind, old_key: str, new_key: str) -> BackupTargetSettings:
+        """Move an entry's settings to a new key, keeping its values and its place in the list."""
+        old_key = old_key.strip()
+        new_key = new_key.strip()
+
+        with self.lock:
+            collection = self._collection(kind)
+            if old_key not in collection or old_key == new_key:
+                return self.entry(kind, new_key)
+
+            renamed = {(new_key if key == old_key else key): item for key, item in collection.items()}
+            setattr(self.settings, _COLLECTIONS[kind][0], renamed)  # Assignment to save edit
+
+            return renamed[new_key]
+
+    def convert(self, old_kind: EntryKind, old_key: str, new_kind: EntryKind, new_key: str) -> BackupTargetSettings:
+        """
+        Turn an entry into the other kind (repository <-> account), with one settings write.
+
+        Keeps what both kinds share: the pull tick and the backup locations.
+        `last_pulled` and account-only settings (skipped, forks) start fresh, since they described the old target.
+        """
+        with self.batch():
+            old = self.find(old_kind, old_key)
+            self.remove(old_kind, old_key)
+            new = self.entry(new_kind, new_key)
+            if old is not None:
+                new.do_pull = old.do_pull
+                new.locations = list(old.locations)
+            return new
+
     def _collection(self, kind: EntryKind) -> dict:
         field_name, _ = _COLLECTIONS[kind]
         return getattr(self.settings, field_name)
@@ -371,17 +402,7 @@ class SettingsManager:
         return self.remove(EntryKind.REPO, url)
 
     def rename_repo(self, old_url: str, new_url: str) -> RepoSettings:
-        """Move a repository's settings to a new URL, keeping its order in the list."""
-        old_url, new_url = old_url.strip(), new_url.strip()
-
-        with self.lock:
-            if old_url not in self.settings.repos or old_url == new_url:
-                return self.repo(new_url)
-
-            self.settings.repos = {
-                (new_url if url == old_url else url): repo for url, repo in self.settings.repos.items()
-            }
-            return self.settings.repos[new_url]
+        return self.rename(EntryKind.REPO, old_url, new_url)
 
     def account(self, owner: str) -> AccountSettings:
         return self.entry(EntryKind.ACCOUNT, owner)

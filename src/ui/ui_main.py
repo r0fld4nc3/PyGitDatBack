@@ -314,20 +314,33 @@ class GitDatBackUI(QWidget):
         self.add_repo_row(target.url, True, "n/a")
         self.url_input.clear()
 
-    def add_repo_row(self, url: str, do_pull: bool, last_pulled: str = "") -> TableRepoEntry:
+    def add_repo_row(self, url: str, do_pull: bool, last_pulled: str = "", row: Optional[int] = None) -> TableRepoEntry:
         repo = Repository(url)
         entry = TableRepoEntry(url, EntryKind.REPO, url, repo=repo)
+        entry.url_label.setToolTip("Double-click to edit the URL")
         entry.set_branch_count(repo.branch_count(self.repos_backup_path))
-        return self._insert_row(entry, do_pull, last_pulled)
+        return self._insert_row(entry, do_pull, last_pulled, row)
 
-    def add_account_row(self, owner: str, do_pull: bool, last_pulled: str = "") -> TableRepoEntry:
+    def add_account_row(
+        self, owner: str, do_pull: bool, last_pulled: str = "", row: Optional[int] = None
+    ) -> TableRepoEntry:
         entry = TableRepoEntry(github_url(owner), EntryKind.ACCOUNT, owner)
-        entry.url_label.setToolTip("Double-click to choose which repositories to back up")
+        entry.url_label.setToolTip("Double-click to edit the URL")
+        entry.branches_label.setToolTip("Double-click to choose which repositories to back up")
         self._update_account_summary(entry)
-        return self._insert_row(entry, do_pull, last_pulled)
+        return self._insert_row(entry, do_pull, last_pulled, row)
 
-    def _insert_row(self, entry: TableRepoEntry, do_pull: bool, last_pulled: str) -> TableRepoEntry:
-        row_pos = self.entry_table.rowCount()
+    def _add_row_from_settings(self, kind: EntryKind, key: str, row: Optional[int] = None) -> TableRepoEntry:
+        """Build a row from what is saved for an entry."""
+        saved = self.config.entry(kind, key)
+        add = self.add_account_row if kind == EntryKind.ACCOUNT else self.add_repo_row
+        return add(key, saved.do_pull, saved.last_pulled, row)
+
+    def _insert_row(
+        self, entry: TableRepoEntry, do_pull: bool, last_pulled: str, row: Optional[int] = None
+    ) -> TableRepoEntry:
+        """Add a row at the end, or at position `row`."""
+        row_pos = self.entry_table.rowCount() if row is None else row
         self.entry_table.insertRow(row_pos)
 
         for column, widget in entry.cell_widgets().items():
@@ -340,7 +353,7 @@ class GitDatBackUI(QWidget):
         if last_pulled:
             entry.set_timestamp(last_pulled)
 
-        self.entries.append(entry)
+        self.entries.insert(row_pos, entry)
 
         logger.info(f"Added entry: {entry.get_url()}")
         self.tell(f"Added entry: {entry.get_url()}")
@@ -382,11 +395,10 @@ class GitDatBackUI(QWidget):
     def handle_cell_doubleclick(self, row, col):
         entry = self.entries[row]
 
-        if entry.is_account:
-            if col in (Column.URL, Column.BRANCHES):
-                self.choose_account_repos(entry)
-        elif col == Column.URL:
-            self.edit_repo_url(entry)
+        if col == Column.URL:
+            self.edit_url(entry)
+        elif col == Column.BRANCHES and entry.is_account:
+            self.choose_account_repos(entry)
 
     def choose_account_repos(self, entry: TableRepoEntry):
         """Open the repository picker for an account row and save the choices on OK."""
@@ -404,40 +416,77 @@ class GitDatBackUI(QWidget):
         self._update_account_summary(entry)
         self.tell(f"{entry.key}: {len(account.skipped)} repositories skipped")
 
-    def edit_repo_url(self, entry: TableRepoEntry):
-        entry_url = entry.get_url()
-
-        input_dialog = QInputDialog(self)
-        input_dialog.setWindowTitle("Edit URL")
-        input_dialog.setLabelText("New URL:")
-        input_dialog.setTextValue(entry_url)
-        input_dialog.resize(400, 200)
-
-        if input_dialog.exec() != QDialog.Accepted:
+    def edit_url(self, entry: TableRepoEntry):
+        """
+        Change a row's URL. The new URL can be a repository or an account, so a row can turn into the other kind.
+        Backups already on disk are untouched.
+        """
+        if self._run_pending:
+            self.tell("Wait for the backup to finish before editing URLs.")
             return
 
-        new_url = input_dialog.textValue().strip()
-        if new_url == entry_url:
+        old_url = entry.get_url()
+        new_url = self._ask_url(old_url)
+
+        if new_url is None or new_url == old_url:
             return
 
         target = parse_github_url(new_url)
-        if target is None or target.kind != EntryKind.REPO:
-            self.tell(f"Unable to validate {new_url}. Add accounts as a new entry.")
+        if target is None:
+            logger.info(f"Unable to validate URL: {new_url}")
+            self.tell(f"Unable to validate {new_url}")
             return
 
-        if self.find_entry(EntryKind.REPO, new_url):
+        new_key = target.owner if target.kind == EntryKind.ACCOUNT else target.url
+        if target.kind == entry.kind and new_key == self._entry_key(entry):
+            return  # Same target, written differently (ex.: trailing .git)
+
+        if self.find_entry(target.kind, new_key):
             self.tell(f"{new_url} already exists.")
             return
 
-        entry.set_url(new_url)
-        entry.repo = Repository(new_url)
-        entry.set_branch_count(entry.repo.branch_count(self.repos_backup_path))
+        converted = target.kind != entry.kind
+        if converted:
+            self.config.convert(entry.kind, entry.key, target.kind, new_key)
+        else:
+            self.config.rename(entry.kind, entry.key, new_key)
 
-        # Move the saved entry to the new URL, otherwise the old one comes back on next launch
-        self.config.rename_repo(entry_url, new_url)
+        # Rebuild the row in place, from the settings it now points at
+        row = self.entries.index(entry)
+        self.entry_table.removeRow(row)
+        self.entries.pop(row)
+        new_entry = self._add_row_from_settings(target.kind, new_key, row)
+        self.entry_table.selectRow(row)
 
-        logger.info(f"Edited {entry_url} to {new_url}")
-        self.tell(f"Edited {entry_url} to {new_url}")
+        converted_to_what = (
+            f"to an account ({new_key})" if converted and new_entry.is_account else f"to {new_entry.get_url()}"
+        )
+        logger.info(f"Edited {old_url} {converted_to_what}")
+        self.tell(f"Changed {old_url} {converted_to_what}")
+
+        # Let user edit repositories as if adding an account
+        if converted and new_entry.is_account:
+            self.choose_account_repos(new_entry)
+
+    def _ask_url(self, current: str) -> Optional[str]:
+        """Ask for a new URL, starting from `current`. None when cancelled."""
+        input_dialog = QInputDialog(self)
+        input_dialog.setWindowTitle("Edit URL")
+        input_dialog.setLabelText("Repository or account URL:")
+        input_dialog.setTextValue(current)
+        input_dialog.resize(400, 200)
+
+        if input_dialog.exec() != QDialog.Accepted:
+            return None
+        return input_dialog.textValue().strip()
+
+    @staticmethod
+    def _entry_key(entry: TableRepoEntry) -> str:
+        """The settings key a row would get if added today (repository URLs normalised)."""
+        if entry.is_account:
+            return entry.key
+        target = parse_github_url(entry.key)
+        return target.url if target else entry.key
 
     # ---------- Removing rows ----------
 
