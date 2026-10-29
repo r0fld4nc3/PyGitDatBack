@@ -3,632 +3,241 @@ import os
 import shutil
 import stat
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple, Union
 from urllib.parse import urlparse
 
 import git
-import psutil
-import requests
-
-from conf_globals import COMMIT_CUTOFF_DAYS, THREAD_TIMEOUT_SECONDS
-from utils import get_env_tempdir
 
 logger = logging.getLogger(__name__)
 
-API_GITHUB_NETLOC = "https://api.github.com"
-API_GITHUB_REPOS = f"{API_GITHUB_NETLOC}/repos"
-API_EXT_GITHUB_BRANCHES = "branches"
+ACCEPTED_DOMAINS = ("github.com",)
+
+# Upstream branches and tags are fetched into a staging area first, never straight over
+# the backup's own refs. Only branches and tags: a plain `--mirror` would also pull
+# GitHub's refs/pull/* (every pull request ever opened), which can be very large.
+STAGING_PREFIX = "refs/staging/"
+STAGING_REFSPECS = ("+refs/heads/*:refs/staging/heads/*", "+refs/tags/*:refs/staging/tags/*")
+
+# When upstream rewrites a branch or moves a tag (force-push, history rewrite), the
+# backup's previous version is kept here, so those commits are never lost:
+#   refs/preserved/<UTC timestamp>/heads/<branch>
+#   refs/preserved/<UTC timestamp>/tags/<tag>
+PRESERVED_PREFIX = "refs/preserved/"
+
+# Never let git stop and wait for a username/password. A private or missing repo
+# would otherwise hang the background service forever.
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 
 
-class Repository(git.Repo):
-    def __init__(self, url, destination_root: Path = None):
-        # super().__init__(*args, **kwargs)
-        self.url: str = url
-        self.name: str = ""
-        self.owner: str = ""
-        self.cloned_to: Path = ""
-        self.repo: git.Repo = None  # Will eventually reference self
-        self.head_name = ""
-        self.repo_branches: list[git.RemoteReference] = list()
-        self.repo_branches_str: list[str] = list()
-        self.active_branches: list[git.RemoteReference] = list()
-        self.active_branches_str: list[str] = list()
+class Repository:
+    """
+    A GitHub repository and its local backup.
 
-        self.last_clone_ok: bool = False  # Result of the most recent clone_from() call
+    The backup is a bare clone holding every branch and tag, stored at
+    `<root>/<owner>/<name>.git`. Each run fetches new commits into it.
+
+    Nothing already backed up is ever dropped:
+    * Branches and tags deleted upstream are kept.
+    * If upstream rewrites a branch or moves a tag, the old version is kept under `refs/preserved/`.
+    """
+
+    def __init__(self, url: str):
+        self.url: str = url.strip()
+        self.owner, self.name = parse_owner_name_from_url(self.url)
 
         self.max_retries = 3
         self.retry_delay = 30  # seconds
 
-        self.owner, self.name = parse_owner_name_from_url(url)
-        # self.head_name = self._get_head()
+    def backup_path(self, root: Union[Path, str]) -> Path:
+        return Path(root).expanduser().resolve() / self.owner / f"{self.name}.git"
 
-        # Add path and repo if destination dir and exists
-        if destination_root:
-            self.set_git_repo(destination_root)
-            self.collect_branches()
+    def has_backup(self, root: Union[Path, str]) -> bool:
+        return (self.backup_path(root) / "HEAD").is_file()
 
-        # Weird monkey fix
-        if not hasattr(self, "git_dir"):
-            self.git_dir = None
-
-    def clone_from(self, dest: Union[Path, str], *args, collect_branches: bool = False, **kwargs):
-        """`@Override`
-
-        Override method to use to clone the designated GitHub URL to disk.
-
-        Performs some necessary preparations for the `Repository` class before calling
-        `git.clone_from()` for the ``git`` library. It does not replace `git.clone_from()`,
-        instead builds to it.
-
-        * When no :param:`branch` is specified, the destination folder will be called `main`
-        to indicate that it is the main branch that is being cloned.
-
-        * If :param:`branch` is specified, it will attempt to clone a branch from the repository
-        and name the corresponding destination folder accordingly.
-
-        Attributes it uses/modifies:
-
-        * :param:`cloned_to`
-        """
-
-        # =================================
-        #          PREPARATION
-        # =================================
-
-        if not isinstance(dest, Path):
-            dest = Path(dest).resolve()
-        else:
-            dest = dest.resolve()
-
-        if not dest.exists():
-            logger.debug(f"[{self.name}] os.makedirs({dest}, exist_ok=True)")
-            os.makedirs(dest, exist_ok=True)
-
-        if f"{self.name.lower()}" not in dest.name.lower():
-            logger.debug(f"[{self.name}] {self.name.lower()} not in {dest}: {self.name} to {dest}")
-            dest = dest / self.name
-
-        # The final destination for the specific branch inside the dest folder
-        clone_dest = dest / (self.head_name or "main").replace("/", "-")  # Needs to be sanitised
-
-        # Reuse a known clone under this destination, regardless of folder layout
-        if not kwargs.get("branch") and self.cloned_to and Path(self.cloned_to).is_relative_to(dest):
-            clone_dest = Path(self.cloned_to)
-
-        if kwargs.get("branch"):
-            sanitised_trail = kwargs.get("branch").split("/", 1)[-1].replace("/", "-")  # Needs to be sanitised
-            clone_dest = dest / sanitised_trail
-
-        # =================================
-        #             CLONING
-        # =================================
-        successful_clone, _ = self.__clone_from_basecls(self.url, clone_dest, args, kwargs)
-        self.last_clone_ok = successful_clone
-
-        if successful_clone:
-            self.cloned_to = clone_dest
-            # Now initialise the base class
-            super().__init__(str(clone_dest))
-            self.repo = self
-
-        if collect_branches:
-            self.collect_branches()
-
-        return self
-
-    def clone_branches(self, only_active=True) -> "Repository":
-        if not self.repo_branches or not self.cloned_to or not self.repo:
-            return
-
-        branch_list = self.repo_branches
-        if only_active:
-            branch_list = self.active_branches
-            logger.info(f"[{self.name}] {only_active=}")
-
-        optimal_workers = _determine_max_workers(load_factor=0.75)
-        with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
-            logger.info(
-                f"Submitting clone_from for branches {', '.join(branch.name for branch in branch_list)} with {optimal_workers} workers"
-            )
-            futures = [
-                executor.submit(self.clone_from, self.cloned_to.parent, branch=branch.name) for branch in branch_list
-            ]
-
-            for future in futures:
-                try:
-                    f = future.result(timeout=THREAD_TIMEOUT_SECONDS)
-                    logger.info(f"{f.name} Result branch awaited successful")
-                except Exception as e:
-                    logger.error(f"Error cloning repository branch {e}")
-
-            logger.info(f"Done awaiting all ({len(futures)}) futures")
-
-        return self
-
-    def collect_branches(self) -> "Repository":
-        """From a cloned local repository, attempts to collect names of existing
-        branches and stores them in a list `self.repo_branches`. This list only
-        contains the names of branches that are not `origin/HEAD` and `origin/main`.
-
-        This method is already called automatically in `self.clone_to` method but can
-        be useful to call when the repository already exists on disk and it is needed
-        to retrieve branch information when no cloning has happened in the same session
-        or instance.
-
-        Attributes it uses/modifies:
-
-        * :param:`repo_branches`
-        """
-
-        self.head_name = self.get_head()
-
-        logger.info(f"[{self.name}] Collecting branch names for {self.name}")
-
-        self.repo_branches.clear()
-        self.repo_branches_str.clear()
-
-        if self.cloned_to and self.cloned_to.exists():
-            logger.info(f"[{self.name}] {self.repo=}")
-
-            # Collect all remote branches
-            self.repo_branches = [head for head in self.repo.remote().refs]
-            branch_names = [head.name for head in self.repo.heads]
-            logger.debug(f"[{self.name}] {branch_names=}")
-            logger.debug(f"[{self.name}] Repo branches ({len(self.repo_branches)}): {self.repo_branches}")
-
-            # Remove origin/HEAD & main branch/master whatever it is named
-            _removes = ["HEAD", self.head_name]
-            logger.debug(f"[{self.name}] {_removes=}")
-            self.repo_branches = [
-                branch for branch in self.repo_branches if branch.name.split("/", 1)[-1] not in _removes
-            ]
-
-            self.repo_branches_str = [branch.name.replace("origin/", "") for branch in self.repo_branches]
-            logger.info(
-                f"[{self.name}] {len(self.repo_branches)} branches for Repository {self.name}: {self.repo_branches}"
-            )
-
-            self.collect_active_branches()
-
-            logger.debug(f"[{self.name}] {self.repo_branches_str=}")
-            logger.debug(f"[{self.name}] {self.active_branches_str=}")
-
-        return self
-
-    def collect_active_branches(self, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> "Repository":
-        self.head_name = self.get_head()
-
-        if not self.repo_branches:
-            logger.info(f"[{self.name}] Repo branches is empty, no active to collect")
-            return self
-
-        self.active_branches.clear()
-        self.active_branches_str.clear()
-
-        for branch in self.repo_branches:
-            active = self._filter_active(branch, active_cutoff_days=active_cutoff_days)
-            if active:
-                logger.info(f"[{self.name}] {branch.name} is active")
-                self.active_branches.append(branch)
-                self.active_branches_str.append(branch.name.replace("origin/", ""))
-
-        logger.info(
-            f"[{self.name}] {len(self.active_branches)} active branches: {', '.join([b.name for b in self.active_branches])}"
-        )
-
-        return self
-
-    def get_head(self) -> str:
-        if not self.repo:
-            logger.info("Unable to get repository HEAD. No repository")
-            return ""
+    def branch_count(self, root: Union[Path, str]) -> int:
+        """Number of branches in the local backup, or 0 when there is none yet."""
+        if not self.has_backup(root):
+            return 0
 
         try:
-            head_branch = self.repo.head.reference
-            head_name = head_branch.name
-            logger.debug(f"[{self.name}] HEAD name: {head_name}")
-            if head_branch.tracking_branch():  # Tracking remote branch
-                logger.debug(f"[{self.name}] {head_name} is a remote tracking branch. Parsing only name")
-                head_name = head_branch.tracking_branch().name.replace("origin/", "")
-                logger.debug(f"Parsed HEAD name: {head_name}")
-        except TypeError:
-            logger.warning(f"[{self.name}] Unable to determine HEAD branch name.")
-            head_name = "main"  # fallback to default
-
-            logger.info(f"[{self.name}] Main branch identified as: {head_name}")
-
-        return head_name
-
-    def _get_head_api(self) -> str:
-        try:
-            api_url = f"{API_GITHUB_REPOS}/{self.owner}/{self.name}"
-            response = requests.get(api_url)
-            response.raise_for_status()
-
-            repo_data = response.json()
-            default_branch = repo_data.get("default_branch", "main")  # Set main as fallback
-
-            return default_branch
+            return len(git.Repo(self.backup_path(root)).heads)
         except Exception as e:
-            logger.error(f"[{self.name}] {e}")
-            return ""
+            logger.warning(f"[{self.name}] Unable to read branches from backup: {e}")
+            return 0
 
-    def _filter_active(self, branch_ref: git.RemoteReference, active_cutoff_days: int = COMMIT_CUTOFF_DAYS) -> bool:
+    def backup(self, root: Union[Path, str]) -> bool:
         """
-        Check if a branch has been active (committed to) within the given number of days.
-
-        :param branch_name: The name of the branch to check.
-        :param active_cutoff_days: The number of days to consider a branch as active (default: 30).
-        :return: True if the branch has commits within the cutoff period, False otherwise.
+        Create the backup on first run, otherwise fetch new commits into it.
+        Retries on failure. Returns `True` when the backup is up to date.
         """
+        dest = self.backup_path(root)
 
-        # Branch is None or empty
-        if not branch_ref:
-            return False
-
-        branch_name = branch_ref.name
-
-        if active_cutoff_days <= 0:
-            logger.debug(f"{active_cutoff_days=} is off. Returning {branch_ref.name} as active.")
-            return True
-
-        try:
-            logger.debug(f"[{self.name}] {branch_name=}")
-            commit = branch_ref.commit
-            commit_date = datetime.fromtimestamp(commit.committed_date).date()
-            cutoff_date = (datetime.now() - timedelta(days=active_cutoff_days)).date()
-
-            logger.debug(f"[{self.name}] Commit date for branch {branch_name}: {commit_date}")
-            logger.debug(f"[{self.name}] Cutoff date for branch {branch_name}: {cutoff_date}")
-
-            days_ago = (datetime.now().date() - commit_date).days
-            logger.debug(f"[{self.name}] Last commit for branch {branch_name}: {days_ago} days ago")
-
-            return commit_date >= cutoff_date
-        except Exception as e:
-            logger.error(f"[{self.name}] An error has occurred from params ({branch_ref=}, {active_cutoff_days=}): {e}")
-            return False
-
-    def set_backup_dir(self, dir_path: Path) -> Path:
-        backup_dir: Path = dir_path.parent / f"backup-{dir_path.name}"
-        logger.info(f"Backup dir: {backup_dir}")
-
-        if backup_dir.exists():
-            logger.info(f"[{self.name}] Deleting backup-dir: {backup_dir}")
-            self.__remove_dir(backup_dir)
-
-            if dir_path.exists():
-                try:
-                    os.rename(dir_path, backup_dir)
-                except Exception as e:
-                    logger.error(f"Error in rename: {e}")
-        else:
-            if dir_path.exists():
-                logger.info(f"Removing tree {dir_path}")
-                self.__remove_dir(dir_path)  # Remove the clone destination. Avoid fatal error
-
-        return backup_dir
-
-    def set_git_repo(self, destination: Path):
-        if not isinstance(destination, Path):
-            destination = Path(destination)
-
-        # Add path and repo if destination dir and exists
-        if destination and destination.exists():
-            repo_dir = _find_existing_clone(destination / self.name)
-            if repo_dir:
-                self.cloned_to = repo_dir.resolve()
-                self.repo = git.Repo(str(self.cloned_to))
-
-                self.head_name = self.get_head()
-                return
-
-        # No local clone yet. Ask GitHub for the default branch so the folder is named after it
-        self.head_name = self._get_head_api() or "main"
-
-    def __remove_dir(self, to_remove: Path) -> bool:
-        # Try to remove the directory
-        logger.debug(f"[{self.name}] shutil.rmtree({to_remove}")
-
-        if not to_remove.exists():
-            logger.info(f"Directory does not exist: {str(to_remove)}")
-            return True
-
-        try:
-            if not to_remove.exists():
-                logger.info(f"Directory does not exist: {str(to_remove)}")
-                return True
-            shutil.rmtree(to_remove, onerror=_rmtree_on_error)  # 3.12 deprecates onerror
-        except Exception as e:
-            logger.error(f"[{self.name}] {e}", exc_info=1)
-            logger.info(f"Python 3.12 deprecated `onerror` and uses `onexc`. Attempting with that...")
+        for attempt in range(1, self.max_retries + 1):
             try:
-                if not to_remove.exists():
-                    logger.info(f"Directory does not exist: {str(to_remove)}")
-                    return True
-                shutil.rmtree(to_remove, onexc=_rmtree_on_error)  # 3.12 replaced onerror with onexc
-            except Exception as e:
-                logger.error(f"[{self.name}] {e}", exc_info=1)
-                return False
-
-        return True
-
-    def __clone_from_basecls(self, url, dest: Path, *args, **kwargs) -> Tuple[bool, Path]:
-        attempt = 0
-        successful_clone = False
-
-        if not isinstance(dest, Path):
-            dest = Path(dest)
-
-        logger.debug(f"{dest=}")
-
-        while attempt < self.max_retries:
-            try:
-                # Destination exists, means we likely have a git repo
                 if dest.exists():
-                    logger.info(
-                        f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Updating Repository: {str(dest)}"
-                    )
-                    if not self.repo:
-                        self.repo = git.Repo(str(dest))
-
-                    origin = self.repo.remotes.origin
-                    logger.info(f"[{self.name}] Fetching origin...")
-                    origin.fetch()
-
-                    logger.info(f"[{self.name}] Calling `origin.pull()`")
-                    origin.pull()
-
-                    successful_clone = True
-                    logger.info(f"[{self.name}] Successful update. Breaking attempt loop.")
-                    break  # Important...
+                    logger.info(f"[{self.name}] Attempt {attempt}/{self.max_retries}: Updating backup {dest}")
+                    self._fetch(dest)
                 else:
-                    logger.info(
-                        f"[{self.name}] Attempt {attempt + 1}/{self.max_retries}: Calling `git.Repo.clone_from({url}, {dest}, {args}, {kwargs})`"
-                    )
-                    self.repo = git.Repo.clone_from(self.url, dest, *args, **kwargs)
-                    successful_clone = True
-                    logger.info(f"[{self.name}] Successful clone. Breaking attempt loop.")
-                    break  # Important...
+                    logger.info(f"[{self.name}] Attempt {attempt}/{self.max_retries}: Creating backup {dest}")
+                    self._clone(dest)
+
+                logger.info(f"[{self.name}] Backup up to date: {dest}")
+                return True
             except Exception as e:
-                attempt += 1
-                no_conn = False
-
-                if "exit code(128)" in str(e):
-                    no_conn = True
-
-                if no_conn and not logger.isEnabledFor(logging.DEBUG):
-                    logger.info(
-                        f"[{self.name}] Clone attempt {attempt} failed: Unable to connect due to exit code(128)"
-                    )
-                else:
-                    logger.warning(f"[{self.name}] Clone attempt {attempt} failed: {e}")
-
                 if attempt < self.max_retries:
+                    logger.warning(f"[{self.name}] Attempt {attempt} failed: {e}")
                     logger.info(f"[{self.name}] Waiting {self.retry_delay} seconds before retry...")
                     time.sleep(self.retry_delay)
                 else:
-                    if no_conn and not logger.isEnabledFor(logging.DEBUG):
-                        logger.info(
-                            f"[{self.name}] All {self.max_retries} attempts failed: Unable to connect due to exit code(128)"
-                        )
-                    else:
-                        logger.error(f"[{self.name}] All {self.max_retries} attempts failed", exc_info=1)
+                    logger.error(f"[{self.name}] All {self.max_retries} attempts failed: {e}")
 
-        return successful_clone, dest
+        return False
+
+    def _clone(self, dest: Path):
+        # Clone next to the final folder and rename once complete, so an interrupted
+        # clone never leaves a half-made backup that later runs would try to update
+        partial = dest.with_name(dest.name + ".partial")
+        if partial.exists():
+            remove_dir(partial)
+
+        partial.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            repo = git.Repo.clone_from(self.url, partial, bare=True, env=GIT_ENV)
+            _use_staging_refspecs(repo)
+            repo.close()
+        except Exception:
+            remove_dir(partial)
+            raise
+
+        partial.rename(dest)
+
+    def _fetch(self, dest: Path):
+        repo = git.Repo(dest)
+        try:
+            # Also upgrades backups made before staging existed
+            _use_staging_refspecs(repo)
+
+            # --refmap= stops git also applying the configured refspecs, so only staging is written.
+            # --prune only removes staging refs; the backup's own branches and tags are never deleted.
+            repo.git.fetch("origin", "--no-tags", "--prune", "--refmap=", *STAGING_REFSPECS, env=GIT_ENV)
+
+            preserved = self._apply_staged_refs(repo)
+            if preserved:
+                logger.warning(f"[{self.name}] Upstream rewrote history. Kept {preserved} old version(s) under {PRESERVED_PREFIX}")
+        finally:
+            repo.close()
+
+    def _apply_staged_refs(self, repo: git.Repo) -> int:
+        """
+        Move the backup's branches and tags to match upstream. A plain fast-forward just moves.
+        Anything else (force-push, moved tag) first saves the old version under `refs/preserved/`.
+        Returns how many old versions were preserved.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        current = _list_refs(repo, "refs/heads/") | _list_refs(repo, "refs/tags/")
+        preserved = 0
+
+        for staged_ref, new_sha in _list_refs(repo, STAGING_PREFIX).items():
+            target = "refs/" + staged_ref.removeprefix(STAGING_PREFIX)
+            old_sha = current.get(target)
+
+            if old_sha == new_sha:
+                continue
+
+            # Tags are meant to be fixed, so any move is kept. Branches only when history was rewritten.
+            is_tag = target.startswith("refs/tags/")
+            if old_sha and (is_tag or not _is_ancestor(repo, old_sha, new_sha)):
+                keep_ref = f"{PRESERVED_PREFIX}{stamp}/{target.removeprefix('refs/')}"
+                repo.git.update_ref(keep_ref, old_sha)
+                logger.warning(f"[{self.name}] {target} was rewritten upstream. Old version kept as {keep_ref}")
+                preserved += 1
+
+            repo.git.update_ref(target, new_sha)
+
+        return preserved
 
 
-def _find_existing_clone(repo_root: Path) -> Union[Path, None]:
-    """
-    Find the local clone for a repository folder.
-
-    Clones live in `<root>/<repo>/<default-branch>`.
-    Older runs could also leave the clone directly in `<root>/<repo>`, so that is accepted too.
-    """
-    if not repo_root.is_dir():
-        return None
-
-    if (repo_root / ".git").exists():
-        return repo_root
-
-    for child in sorted(repo_root.iterdir()):
-        if child.is_dir() and not child.name.startswith("backup-") and (child / ".git").exists():
-            return child
-
-    return None
+def _use_staging_refspecs(repo: git.Repo):
+    """Point the backup's fetch config at staging, so even a manual `git fetch` cannot overwrite history."""
+    repo.git.config("--replace-all", "remote.origin.fetch", STAGING_REFSPECS[0])
+    repo.git.config("--add", "remote.origin.fetch", STAGING_REFSPECS[1])
 
 
-def _rmtree_on_error(func, path, exc_info):
+def _list_refs(repo: git.Repo, prefix: str) -> dict[str, str]:
+    """`{ref name: object id}` for every ref under `prefix`."""
+    out = repo.git.for_each_ref("--format=%(refname) %(objectname)", prefix)
+    return dict(line.split(" ", 1) for line in out.splitlines() if line)
+
+
+def _is_ancestor(repo: git.Repo, old: str, new: str) -> bool:
+    """True when `new` simply builds on `old`, so moving to it loses nothing."""
+    try:
+        repo.git.merge_base("--is-ancestor", old, new)
+        return True
+    except git.GitCommandError:
+        # Not an ancestor, or not comparable (e.g. a tag on a non-commit): treat as a rewrite and keep it
+        return False
+
+
+def remove_dir(path: Path) -> bool:
+    """Delete a folder tree, including read-only git object files. Returns `True` when it is gone."""
+    if not path.exists():
+        return True
+
+    try:
+        shutil.rmtree(path, onexc=_rmtree_on_error)
+    except Exception as e:
+        logger.error(f"Unable to remove {path}: {e}")
+        return False
+
+    return True
+
+
+def _rmtree_on_error(func, path, exc):
     # https://stackoverflow.com/a/2656405
-    """
-    Error handler for ``shutil.rmtree``.
-
-    If the error is due to an access error (read only file)
-    it attempts to add write permission and then retries.
-
-    If the error is for another reason it re-raises the error.
-
-    Usage : ``shutil.rmtree(path, onexc=onerror)``
-    """
-    # Is the error an access error?
+    # Git marks object files read-only, which blocks deletion on Windows. Make writable and retry.
     if not os.access(path, os.W_OK):
         logger.info(f"Re-attempting delete path {path}")
         os.chmod(path, stat.S_IWUSR)
         func(path)
     else:
         logger.error(f"Raising undeletable error for path {path}")
-        raise
+        raise exc
 
 
 def parse_owner_name_from_url(url: str) -> Tuple[str, str]:
-    logger.info(f"Parsing URL {url}")
     owner: str = ""
     name: str = ""
 
-    parsed = urlparse(url)
-    netloc = parsed.netloc
-
-    if netloc.lower() != API_GITHUB_NETLOC:
-        logger.warning(f"{url} netloc ({netloc} mismatch with API {API_GITHUB_NETLOC})")
-
-    _path = parsed.path
-    _path_split = [i for i in _path.split("/") if i]  # Also remove empty values
+    parsed = urlparse(url.strip())
+    _path_split = [i for i in parsed.path.split("/") if i]  # Also remove empty values
 
     if len(_path_split) > 1:
         owner = _path_split[0]
-        name = _path_split[1]
+        name = _path_split[1].removesuffix(".git")
 
-    logger.info(f"{owner=}")
-    logger.info(f"{name=}")
+    logger.debug(f"Parsed {url}: {owner=} {name=}")
 
     return owner, name
 
 
 def validate_github_url(url: str) -> bool:
-    """Validates a URL to be of family GitHub and if it exists on the network
-
-    Accepted domain(s) are
-    * `github.com`
-
-    :return: `True` if domain is valid from accepted domains and repository is accessible.
     """
-
-    logger.info(f"Validating URL {url}")
-
-    accepted_domains = ["github.com"]
-
-    parsed = urlparse(url)
+    Checks the URL is a GitHub repository URL (`https://github.com/<owner>/<name>`).
+    It does not check the repository exists. A missing repo fails when it is backed up.
+    """
+    parsed = urlparse(url.strip())
     owner, name = parse_owner_name_from_url(url)
-    logger.debug(f"{parsed=}")
-    netloc = parsed.netloc
-    path = parsed.path
 
-    if netloc in accepted_domains:
-        if not path:
-            logger.info(f"Path must exist and not be a bare url.")
-            return False
+    if parsed.netloc.lower() not in ACCEPTED_DOMAINS:
+        logger.info(f"{parsed.netloc} is not a valid {ACCEPTED_DOMAINS} domain.")
+        return False
 
-        # Some path exists. Validate if accessible and is valid for repo
-        api_url = f"{API_GITHUB_REPOS}/{owner}/{name}"
-        if not owner or not name:
-            logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
-            return False
+    if not owner or not name:
+        logger.info(f"Owner and Name must be valid: {owner=} | {name=}")
+        return False
 
-        """response = requests.get(api_url)
-        if response.status_code == 200:
-            logger.info(f"({response.status_code}) {url} is a valid repository")
-            return True
-        
-        if response.status_code == 404:
-            logger.info(f"({response.status_code}) {url} does not exist")
-        elif response.status_code == 403:
-            logger.info(f"({response.status_code}) {url} rate limit exceeded")
-        else:
-            logger.info(f"Error or unhandled branch for ({response.status_code}) {url}")"""
-
-        return True
-
-    else:
-        logger.info(f"{netloc} is not a valid {accepted_domains} domain.")
-
-    return False
-
-
-def _determine_max_workers(load_factor: float = 1.0, max_limit: int = None) -> int:
-    """
-    Determine the optimal number of workers for ThreadPoolExecutor based on system resources.
-
-    :param load_factor: A multiplier to adjust the number of threads per CPU core.
-                        Use 1.0 for a balanced ratio, higher values for more concurrency.
-    :param max_limit: An upper limit for max workers (optional), to avoid overloading the system.
-    :return: The optimal number of workers for ThreadPoolExecutor.
-    """
-
-    cpus = os.cpu_count()
-    available_memory_gb = psutil.virtual_memory().available / (1024**3)
-    optimal_workers = int(cpus * load_factor)
-    mem_limit = int(available_memory_gb * 10)  # ~100 MB per worker
-
-    if max_limit is not None:
-        optimal_workers = min(optimal_workers, max_limit)
-
-    optimal_workers = min(optimal_workers, mem_limit)
-
-    return max(1, optimal_workers)
-
-
-def get_branches_and_commits(repo) -> Tuple[int, dict]:
-    owner, repo = parse_owner_name_from_url(repo)
-
-    # Endpoint API to list branches
-    api_url = f"{API_GITHUB_REPOS}/{owner}/{repo}/{API_EXT_GITHUB_BRANCHES}"
-    logger.info(f"{api_url=}")
-
-    ret_info = {}
-
-    response = requests.get(api_url)
-    logger.info(f"Response Code: {response.status_code}")
-
-    if response.status_code == 200:
-        branches_info = response.json()
-
-        for branch in branches_info:
-            branch_name = branch["name"]
-            last_commit_sha = branch["commit"]["sha"]
-            last_commit_url = branch["commit"]["url"]
-
-            ret_info[branch_name] = {
-                "last_commit_sha": last_commit_sha,
-                "last_commit_url": last_commit_url,
-                "last_commit_date": "",
-            }
-
-            # Fetch commit details
-            commit_response = requests.get(last_commit_url)
-            if commit_response.status_code == 200:
-                commit_info = commit_response.json()
-                commit_date = commit_info["commit"]["committer"]["date"]
-                ret_info[branch_name]["last_commit_date"] = commit_date
-
-    elif response.status_code == 403:
-        logger.info(f"API rate limit exceeded")
-
-    logger.info(f"{ret_info}")
-
-    return response.status_code, ret_info
-
-
-def get_branches_shallow_clone(url: str) -> dict:
-    temp_dir = get_env_tempdir() / "pygitdatback" / "tempclone"
-
-    branches = {}
-
-    try:
-        logger.info(f"Cloning {url} to {temp_dir}")
-        repo = git.Repo.clone_from(url, temp_dir, depth=1)
-
-        for ref in repo.remote().refs:
-            branch_name = ref.remote_head
-            last_commmit_sha = ref.commit.hexsha
-            last_commmit_date = ref.commit.committed_datetime.isoformat()
-
-            branches[branch_name] = {"last_commit_sha": last_commmit_sha, "last_commit_date": last_commmit_date}
-    except Exception as e:
-        logger.error(f"{e}")
-
-    logger.debug(f"{branches=}")
-
-    return branches
-
-
-def api_status():
-    api_url = API_GITHUB_NETLOC
-    logger.info(f"{api_url=}")
-
-    response = requests.get(api_url)
-    logger.info(f"Response Code: {response.status_code}")
-
-    return response.status_code
+    return True

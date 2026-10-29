@@ -1,9 +1,10 @@
+import logging
 from datetime import datetime
+
 from PySide6.QtWidgets import QApplication
 
-import logging
-
 logger = logging.getLogger(__name__)
+
 
 def get_screen_info(app: QApplication) -> tuple:
     # Get the primary screen
@@ -14,7 +15,7 @@ def get_screen_info(app: QApplication) -> tuple:
     size = screen.size()
     width = size.width()
     height = size.height()
-    
+
     logger.debug(f"{size=}")
     logger.debug(f"{width=}")
     logger.debug(f"{height=}")
@@ -29,6 +30,7 @@ def get_screen_info(app: QApplication) -> tuple:
 def get_current_timestamp() -> str:
     fmt = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
     return fmt
+
 
 def to_datetime(ts: str) -> datetime:
     try:

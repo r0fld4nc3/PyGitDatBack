@@ -1,12 +1,12 @@
+import json
+import logging
 import os
 import sys
-import json
 from pathlib import Path
 from typing import Union
 
-from conf_globals import HOST, APP_NAME
-from utils import get_os_env_config_folder, get_home_folder
-import logging
+from defines import APP_NAME, HOST
+from utils import get_home_folder, get_os_env_config_folder
 
 CONFIG_FOLDER = get_os_env_config_folder() / HOST / APP_NAME
 
@@ -17,6 +17,7 @@ class Settings:
     """
     Singleton-like Settings class for storing and accessing application settings.
     """
+
     _instance = None
     _loaded = False
 
@@ -30,7 +31,7 @@ class Settings:
     KEY_REPOS = "repos"
     KEY_DO_PULL = "do_pull"
     KEY_LAST_PULLED = "last_pulled"
-    KEY_BRANCHES = "branches"
+    KEY_BRANCHES_LEGACY = "branches"  # No longer used. Removed from saved repos on next save
     KEY_WIN_SIZE = "window_size"
     KEY_REPO_LOC = "locations"
     KEY_LAST_RUN = "last_run"
@@ -45,9 +46,9 @@ class Settings:
         KEY_SERVICE_SET: False,
         KEY_REPOS: {},
         KEY_WIN_SIZE: "",
-        KEY_LAST_RUN: ""
+        KEY_LAST_RUN: "",
     }
-    
+
     _config_file_name = "pygitdatback-settings.json"
     config_dir = Path(CONFIG_FOLDER)
     config_file = Path(CONFIG_FOLDER) / _config_file_name
@@ -59,54 +60,42 @@ class Settings:
         return cls._instance
 
     def set_save_root_dir(self, p: Union[str, Path]):
-        self.settings[self.KEY_SAVE_TO] = str(p).replace("\\\\", '/').replace( "\\", '/')
+        self.settings[self.KEY_SAVE_TO] = str(p).replace("\\\\", "/").replace("\\", "/")
 
-    def get_save_root_dir(self, fallback: Union[str, Path]=None) -> str:
+    def get_save_root_dir(self, fallback: Union[str, Path] = None) -> str:
         if fallback is None:
             fallback = get_home_folder() / HOST / APP_NAME / "Repositories"
             logger.info(f"No fallback set. Setting to: {fallback}")
-        
+
         path = self.settings.get(self.KEY_SAVE_TO, Path(fallback))
         logger.info(f"Retrieved path {path}")
-        
+
         if not path:
             # Path could be just empty
             logger.info(f"Retrieved non sensical path. Setting to fallback {fallback}")
             path = fallback
-        
+
         self.set_save_root_dir(path)
         return path
-    
-    def save_repo(self, repo_url, do_pull, timestamp:str = "", branches: list = []):
+
+    def save_repo(self, repo_url, do_pull, timestamp: str = ""):
         repo_url = str(repo_url).strip()
 
-        logger.info(f"Save repository {repo_url}\n{do_pull=}, {timestamp=}, {branches=}")
+        logger.info(f"Save repository {repo_url}: {do_pull=}, {timestamp=}")
 
-        if self.KEY_REPOS not in self.settings:
-            logger.info(f"Creating key {self.KEY_REPOS}")
-            self.settings[self.KEY_REPOS] = {}
+        repos = self.settings.setdefault(self.KEY_REPOS, {})
 
-        if repo_url not in self.settings[self.KEY_REPOS]:
-            logger.info(f"{repo_url} not in repo keys")
-            logger.debug(f"{self.settings[self.KEY_REPOS]}")
-            
-            # Structure the repository data
-            self.settings[self.KEY_REPOS][repo_url] = {
+        if repo_url not in repos:
+            repos[repo_url] = {
                 self.KEY_DO_PULL: do_pull,
                 self.KEY_LAST_PULLED: timestamp,
-                self.KEY_BRANCHES: branches,
-                self.KEY_REPO_LOC: []
+                self.KEY_REPO_LOC: [],
             }
         else:
-            self.settings[self.KEY_REPOS][repo_url][self.KEY_DO_PULL] = do_pull
-            
+            repos[repo_url][self.KEY_DO_PULL] = do_pull
             if timestamp:
-                self.settings[self.KEY_REPOS][repo_url][self.KEY_LAST_PULLED] = timestamp
-
-            info_section = self.settings[self.KEY_REPOS][repo_url]
-            if self.KEY_BRANCHES not in info_section:
-                info_section[self.KEY_BRANCHES] = branches
-            info_section[self.KEY_BRANCHES] = branches
+                repos[repo_url][self.KEY_LAST_PULLED] = timestamp
+            repos[repo_url].pop(self.KEY_BRANCHES_LEGACY, None)
 
     def remove_repo(self, repo_url) -> bool:
         repo_url = str(repo_url).strip()
@@ -127,7 +116,7 @@ class Settings:
 
     def get_repos(self) -> dict:
         return self.settings.get(self.KEY_REPOS, {})
-    
+
     def save_window_size(self, width: int, height: int):
         self.settings[self.KEY_WIN_SIZE] = [width, height]
 
@@ -137,54 +126,54 @@ class Settings:
         return width_height
 
     def save_config(self) -> Path:
-        if self.config_dir == '' or not Path(self.config_dir).exists():
+        if self.config_dir == "" or not Path(self.config_dir).exists():
             os.makedirs(self.config_dir, exist_ok=True)
             logger.info(f"Generated config folder {self.config_dir}")
 
-        with open(self.config_file, 'w', encoding="utf-8") as config_file:
+        with open(self.config_file, "w", encoding="utf-8") as config_file:
             config_file.write(json.dumps(self.settings, indent=2))
             logger.info(f"Saved config {self.config_file}")
 
         return self.config_file
-    
+
     def get_background_service_status(self) -> bool:
         return self.settings.get(self.KEY_SERVICE_SET)
-    
+
     def set_background_service_status(self, status: bool):
         self.settings[self.KEY_SERVICE_SET] = status
         logger.info(f"Set background service status to: {status}")
 
     def get_schedule_type(self) -> str:
         return self.settings.get(self.KEY_SCHEDULED_TYPE, "")
-    
+
     def set_schedule_type(self, schedule_type: str):
         self.settings[self.KEY_SCHEDULED_TYPE] = schedule_type
         logger.info(f"Set schedule type: {schedule_type}")
-    
+
     def get_scheduled_week_day(self) -> str:
         return self.settings.get(self.KEY_SCHEDULED_WEEK_DAY, "")
-    
+
     def set_scheduled_week_day(self, day: str):
         logger.info(f"Set Scheduled Day to {day}")
         self.settings[self.KEY_SCHEDULED_WEEK_DAY] = day
 
     def get_scheduled_month_day(self) -> str:
         return self.settings.get(self.KEY_SCHEDULED_MONTH_DAY, "")
-    
+
     def set_scheduled_month_day(self, day: str):
         logger.info(f"Set Scheduled Month Day to {day}")
         self.settings[self.KEY_SCHEDULED_MONTH_DAY] = day
-    
+
     def get_scheduled_month(self) -> int:
         return self.settings.get(self.KEY_SCHEDULED_MONTH, 1)
-    
+
     def set_scheduled_month(self, month: int):
         logger.info(f"Set Scheduled Month to {month}")
         self.settings[self.KEY_SCHEDULED_MONTH] = month
-    
+
     def get_scheduled_time(self) -> str:
         return self.settings.get(self.KEY_SCHEDULED_TIME, "")
-    
+
     def set_scheduled_time(self, time: str) -> str:
         logger.info(f"Set Scheduled Time to {time}")
         self.settings[self.KEY_SCHEDULED_TIME] = time
@@ -194,13 +183,13 @@ class Settings:
 
         if not isinstance(locations, list):
             locations = [str(locations)]
-        
+
         repo = self.settings[self.KEY_REPOS].get(url)
 
         if not repo:
             logger.info(f"No repository present: {url}")
             return []
-        
+
         repo_locations: list = repo.get(self.KEY_REPO_LOC, [])
 
         # Extend avoid duplicates
@@ -212,18 +201,18 @@ class Settings:
 
     def get_repo_locations(self, url) -> list:
         logger.info(f"Getting locations for repository {url}")
-        
+
         repo = self.settings[self.KEY_REPOS].get(url)
         if not repo:
             logger.info(f"Unable to obtain repository: {url}")
             return []
-        
+
         locations = repo.get(self.KEY_REPO_LOC, [])
 
         logger.info(f"Repository locations: {locations}")
 
         return locations
-    
+
     def get_last_run(self) -> str:
         last_run = self.settings.get(self.KEY_LAST_RUN, "")
         logger.info(f"Got last run timestamp: {last_run}")
@@ -237,8 +226,7 @@ class Settings:
         logger.info(f"{CONFIG_FOLDER=}")
 
         if not self._loaded:
-            if self.config_dir == '' or not Path(self.config_dir).exists()\
-                    or not Path(self.config_file).exists():
+            if self.config_dir == "" or not Path(self.config_dir).exists() or not Path(self.config_file).exists():
                 logger.debug(f"Config does not exist.")
                 return self.settings
 
@@ -246,7 +234,7 @@ class Settings:
 
             logger.debug(f"Loading config {self.config_file}")
             config_error = False
-            with open(self.config_file, 'r', encoding="utf-8") as config_file:
+            with open(self.config_file, "r", encoding="utf-8") as config_file:
                 try:
                     self.settings = json.load(config_file)
                 except Exception as e:
@@ -256,7 +244,7 @@ class Settings:
 
             if config_error:
                 logger.info("Generating new config file.")
-                with open(self.config_file, 'w', encoding="utf-8") as config_file:
+                with open(self.config_file, "w", encoding="utf-8") as config_file:
                     config_file.write(json.dumps(self.settings, indent=2))
             logger.debug(self.settings)
 
@@ -284,7 +272,7 @@ class Settings:
             logger.info("No config file to cleanup")
             return False
 
-        with open(self.config_file, 'r', encoding="utf-8") as config_file:
+        with open(self.config_file, "r", encoding="utf-8") as config_file:
             settings = dict(json.load(config_file))
             logger.info(f"[clean_save_file] Loaded settings: {json.dumps(settings, indent=2)}")
 
@@ -293,7 +281,7 @@ class Settings:
                 settings.pop(setting)
                 logger.debug(f"Cleared unused settings key: {setting}")
 
-        with open(self.config_file, 'w', encoding="utf-8") as config_file:
+        with open(self.config_file, "w", encoding="utf-8") as config_file:
             config_file.write(json.dumps(settings, indent=2))
             logger.debug(f"Saved cleaned config: {self.config_file}")
 

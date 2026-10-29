@@ -2,14 +2,13 @@ import logging
 from logging import FileHandler
 from pathlib import Path
 
-from conf_globals import APP_NAME, HOST
-
-from .path_helpers import get_os_env_config_folder
+from defines import APP_NAME, HOST
+from utils.path_helpers import get_os_env_config_folder
 
 LOG_FILE = get_os_env_config_folder() / HOST / APP_NAME / f"{APP_NAME}.log"
 
 # Third-party loggers that are very chatty at DEBUG level
-_NOISY_LOGGERS = ("git", "urllib3", "requests")
+_NOISY_LOGGERS = ("git",)
 
 
 def configure_logging(level: int = logging.INFO, log_file: Path = LOG_FILE, console: bool = True) -> None:

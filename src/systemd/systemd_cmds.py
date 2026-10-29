@@ -1,10 +1,10 @@
-import shutil
-from typing import Tuple
-from pathlib import Path
-from enum import Enum
-
-from conf_globals import HOST, APP_NAME
 import logging
+import shutil
+from enum import Enum
+from pathlib import Path
+from typing import Tuple
+
+from defines import APP_NAME, HOST
 from utils import get_os_env_config_folder
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ _THIS_FILE_PATH = Path(__file__).parent.resolve()
 # /home/user/.local/share/r0fld4nc3/PyGitDatBack
 WORK_DIR = get_os_env_config_folder() / HOST / APP_NAME
 VENV_PATH = WORK_DIR / "PyGitDatBack.venv"
-VENV_BIN_PATH = VENV_PATH / "bin"/ "python3"
+VENV_BIN_PATH = VENV_PATH / "bin" / "python3"
 
 SERVICE_FILE_TO_COPY = _THIS_FILE_PATH / "services" / "pygitdatback-noui.service"
 TIMER_FILE_TO_COPY = _THIS_FILE_PATH / "services" / "pygitdatback-noui.timer"
@@ -53,6 +53,7 @@ OnCalendar=Mon..Fri *-*-* 9:00   # Weekdays at 9:00
 OnCalendar=*-*-* 9:00..17:00     # Every hour from 9:00 to 17:00
 """
 
+
 class ScheduleTypes(Enum):
     DAILY = "daily"
     WEEKLY = "weekly"
@@ -62,9 +63,11 @@ class ScheduleTypes(Enum):
     YEARLY = "yearly"
 
 
-def format_schedule(schedule_type: str, week_day: str="Fri", month: str="1", month_day: str="1", time: str="18:00:00"):
+def format_schedule(
+    schedule_type: str, week_day: str = "Fri", month: str = "1", month_day: str = "1", time: str = "18:00:00"
+):
     schedule_type = schedule_type.lower()
-    
+
     logger.info(f"Type to schedule is {schedule_type}")
     logger.info(f"{week_day=}")
     logger.info(f"{month=}")
@@ -73,26 +76,33 @@ def format_schedule(schedule_type: str, week_day: str="Fri", month: str="1", mon
 
     if schedule_type == ScheduleTypes.DAILY.value:
         return f"*-*-* {time}"
-    
+
     if schedule_type == ScheduleTypes.WEEKLY.value:
         return f"{week_day} *-*-* {time}"
 
     if schedule_type == ScheduleTypes.MONTHLY.value:
         return f"*-*-{month_day} {time}"
-    
+
     if schedule_type == ScheduleTypes.MONTH_SPEC.value:
         return f"*-{month}-{month_day} {time}"
-    
+
     if schedule_type == ScheduleTypes.YEARLY.value:
         return f"*-{month}-{month_day} {time}"
-    
+
     # Return a default
     return f"{week_day} *-*-* {time}"
 
-def register_service(schedule_type=ScheduleTypes.WEEKLY.value, week_day: str="Fri", month: str="1,3,6,8,12", month_day: str="6", time: str="18:00:00") -> Tuple[bool, str]:
+
+def register_service(
+    schedule_type=ScheduleTypes.WEEKLY.value,
+    week_day: str = "Fri",
+    month: str = "1,3,6,8,12",
+    month_day: str = "6",
+    time: str = "18:00:00",
+) -> Tuple[bool, str]:
     success = True
     status = ""
-    
+
     # Copy files to temp
     temp_service_file = WORK_DIR / SERVICE_FILE_TO_COPY.name
     temp_timer_file = WORK_DIR / TIMER_FILE_TO_COPY.name
@@ -106,7 +116,7 @@ def register_service(schedule_type=ScheduleTypes.WEEKLY.value, week_day: str="Fr
     if not success:
         status = f"Unable to copy {str(TIMER_FILE_TO_COPY)} to {str(temp_timer_file)}"
         return success, status
-    
+
     schedule = format_schedule(schedule_type, week_day, month, month_day, time)
     _replace_service_file_vars(temp_service_file)
     _replace_timer_file_vars(temp_timer_file, schedule)
@@ -118,36 +128,40 @@ def register_service(schedule_type=ScheduleTypes.WEEKLY.value, week_day: str="Fr
 
     return success, status
 
+
 def unregister_service() -> Tuple[bool, str]:
     success = True
     status = ""
-    
+
     cmd_to_copy = f"chmod +x {str(UNREGISTER_SHELL_FILE)} && {str(UNREGISTER_SHELL_FILE)} {str(SERVICE_FILE_TO_COPY.name)} {str(TIMER_FILE_TO_COPY.name)}"
     status = cmd_to_copy
     logger.info(status)
 
     return success, status
 
+
 def _read_file(file_path: Path) -> list[str]:
     contents = []
     if file_path.exists():
         # Read
-        with open(file_path, 'r') as fp:
+        with open(file_path, "r") as fp:
             contents = fp.readlines()
 
     return contents
 
+
 def _write_contents(file_path: Path, contents: list[str]) -> bool:
     try:
         if contents:
-            with open(file_path, 'w') as f:
+            with open(file_path, "w") as f:
                 f.writelines(contents)
             logger.info(f"Wrote lines to {str(file_path)}")
     except Exception as e:
         logger.error(f"Error writing file {str(file_path)}: {e}")
         return False
-    
+
     return True
+
 
 def _replace_service_file_vars(service_file_path: Path):
     python_path = "{{PYTHON_PATH}}"
@@ -166,17 +180,18 @@ def _replace_service_file_vars(service_file_path: Path):
                 if python_path in line:
                     line = line.replace(python_path, str(VENV_BIN_PATH))
                     contents[i] = line
-                
+
                 if service_path_to_entry_point in line:
                     line = line.replace(service_path_to_entry_point, str(entry_point_path))
                     contents[i] = line
-                
+
                 if service_path_to_project in line:
                     line = line.replace(service_path_to_project, str(path_to_project))
                     contents[i] = line
 
         # Write - duh
         _write_contents(service_file_path, contents)
+
 
 def _replace_timer_file_vars(timer_file_path: Path, schedule: str):
     schedule_var = "{{SCHEDULE}}"

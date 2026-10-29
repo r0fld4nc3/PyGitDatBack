@@ -1,11 +1,10 @@
 import logging
-import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import QDateTime, QRunnable, QSize
+from PySide6.QtCore import QDateTime, QSize
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,11 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 import systemd
-from conf_globals import DRY_RUN, MAX_CONCURRENT_TASKS, VERSION
+from defines import DRY_RUN, MAX_CONCURRENT_TASKS, VERSION
 from libgit import (
     Repository,
-    get_branches_and_commits,
     parse_owner_name_from_url,
+    remove_dir,
     validate_github_url,
 )
 from settings import Settings
@@ -36,27 +35,12 @@ from .classes import (
     AlertDialog,
     CloneRepoTask,
     ServiceConfigWindow,
-    TableBranchView,
     TableRepoEntry,
     TaskQueue,
 )
 from .utils import get_current_timestamp, get_screen_info
 
 logger = logging.getLogger(__name__)
-
-
-class BranchTask(QRunnable):
-    def __init__(self, url, callback):
-        super().__init__()
-        self.url = url
-        self.callback = callback
-
-    def run(self):
-        try:
-            result = get_branches_and_commits(self.url)
-            self.callback(result)
-        except Exception as e:
-            logger.error(f"Error obtaining branches and commits for repository {self.url}: {e}")
 
 
 class GitDatBackUI(QWidget):
@@ -160,13 +144,18 @@ class GitDatBackUI(QWidget):
         self.set_all_deselected_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Backup Path Layout
+        self.backup_path_vertical_layout = QVBoxLayout()
         self.backup_path_layout = QHBoxLayout()
+
+        # Backup Path Picker Label
+        self.lbl_pick_backup_path = QLabel("Backup Location:")
 
         # Backup Path Input
         self.backup_path_input = QLineEdit()
         self.backup_path_input.setPlaceholderText("Root folder for repositories...")
         self.backup_path_input.setText(str(self.repos_backup_path))
         self.backup_path_input.editingFinished.connect(self.set_backup_path)
+        self.backup_path_input.setDisabled(True)
 
         # Backup Path Pick Button
         self.pick_backup_path_button = QPushButton("Pick")
@@ -175,6 +164,7 @@ class GitDatBackUI(QWidget):
 
         # Pull Repos Button
         self.pull_button = QPushButton("Pull Repos")
+        self.pull_button.setMinimumHeight(40)
         self.pull_button.clicked.connect(self.pull_repos)
 
         # Register Services Buttons layout
@@ -208,6 +198,7 @@ class GitDatBackUI(QWidget):
         remove_button_layout.addStretch()
 
         # Add widgets to backup path layout
+        self.backup_path_vertical_layout.addWidget(self.lbl_pick_backup_path)
         self.backup_path_layout.addWidget(self.backup_path_input)
         self.backup_path_layout.addWidget(self.pick_backup_path_button)
 
@@ -223,7 +214,8 @@ class GitDatBackUI(QWidget):
         main_layout.addLayout(self.actions_layout)
         main_layout.addWidget(self.entry_table)
         main_layout.addLayout(remove_button_layout)
-        main_layout.addLayout(self.backup_path_layout)
+        main_layout.addLayout(self.backup_path_vertical_layout)
+        self.backup_path_vertical_layout.addLayout(self.backup_path_layout)
         main_layout.addLayout(register_services_layout)
         main_layout.addWidget(self.pull_button)
 
@@ -241,9 +233,8 @@ class GitDatBackUI(QWidget):
         for repo_url, info in repos.items():
             do_pull = info.get(Settings.KEY_DO_PULL)
             timestamp = info.get(Settings.KEY_LAST_PULLED)
-            branches = info.get(Settings.KEY_BRANCHES)
 
-            self.add_to_table(repo_url, do_pull, timestamp, branches=branches)
+            self.add_to_table(repo_url, do_pull, timestamp)
 
         self.tell("Status: Ready")
 
@@ -271,16 +262,11 @@ class GitDatBackUI(QWidget):
         # Save to settings
         self.settings.save_repo(url, entry.pull_checkbox.isChecked())
 
-        # branch_task = BranchTask(url, lambda res: self._update_entry_branches(entry, res))
-        # self.task_queue.add_task(branch_task)
-
-        # entry.branches_label.setText("Fecthing...")
-
         self.url_input.clear()
 
-    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "", branches: list = []) -> TableRepoEntry:
+    def add_to_table(self, url: str, do_pull: bool, timestamp: str = "") -> TableRepoEntry:
         entry = TableRepoEntry(url)
-        repo = Repository(url, destination_root=self.settings.get_save_root_dir())
+        repo = Repository(url)
 
         row_pos = self.entry_table.rowCount()
         self.entry_table.insertRow(row_pos)
@@ -298,12 +284,8 @@ class GitDatBackUI(QWidget):
         if timestamp:
             entry.set_timestamp(timestamp)
 
-        # Handle branches
-        if branches:
-            entry.set_branches(branches)
-            entry.set_branches_label_text(f"{len(entry.get_branches())} ({len(repo.active_branches_str)})")
-        else:
-            entry.set_branches_label_text(f"0 ({len(repo.active_branches_str)})")
+        # Branch count from the existing backup, if any
+        entry.set_branch_count(repo.branch_count(self.repos_backup_path))
 
         self.entries.append(entry)
         self.repos.append(repo)
@@ -313,76 +295,44 @@ class GitDatBackUI(QWidget):
 
         return entry
 
-    def _update_entry_branches(self, entry, result):
-        # TODO: When we are finally saving to a file, check if there are branches saved before we pull from the api
-
-        logger.info(f"Update Entry {entry} with {result}")
-        branches = []
-
-        status = result[0]
-        branch_info = result[1]
-
-        if status != 200:
-            code = str(status)
-            if status == 403:
-                code += " (Rate limited)"
-            elif status == 404:
-                code += " (Not found)"
-            branches.append(code)
-        else:
-            for branch_name, branch_info in branch_info.items():
-                branches.append(branch_name)
-
-        entry.set_branches(branches)
-
     def handle_cell_doubleclick(self, row, col):
-        clickable_cols = [1, 2]
+        if col != 1:  # Only the URL column is editable
+            return
 
-        if col in clickable_cols:
-            if col == clickable_cols[0]:
-                item = self.entry_table.item(row, col)
-                entry_item = self.entries[row]
-                entry_url = entry_item.get_url()
-                prefilled = entry_url
+        entry_item = self.entries[row]
+        entry_url = entry_item.get_url()
 
-                logger.debug(f"Entry: {entry_item} {entry_url}")
-                logger.debug(f"{prefilled=}")
+        input_dialog = QInputDialog(self)
+        input_dialog.setWindowTitle("Edit URL")
+        input_dialog.setLabelText("New URL:")
+        input_dialog.setTextValue(entry_url)
+        input_dialog.resize(400, 200)
 
-                input_dialog = QInputDialog(self)
-                input_dialog.setWindowTitle("Edit URL")
-                input_dialog.setLabelText("New URL:")
-                input_dialog.setTextValue(prefilled)
-                input_dialog.resize(400, 200)
+        if input_dialog.exec() != QDialog.Accepted:
+            return
 
-                if input_dialog.exec_() == QDialog.Accepted:
-                    new_url = input_dialog.textValue()
-                    if validate_github_url(new_url):
-                        entry_item.set_url(new_url)
-                        logger.info(f"Edited {entry_url} to {new_url}")
-                        self.tell(f"Edited {entry_url} to {new_url}")
-            elif col == clickable_cols[1]:  # Edit Branches Col
-                item = self.entry_table.item(row, col)
-                entry_item: TableRepoEntry = self.entries[row]
-                entry_url = entry_item.get_url()
+        new_url = input_dialog.textValue().strip()
+        if new_url == entry_url:
+            return
 
-                # Collect active branches and update list
-                entry_repo: Repository = self.repos[row]
-                all_active_branches = entry_repo.active_branches_str
-                logger.debug(f"{all_active_branches=}")
+        if not validate_github_url(new_url):
+            self.tell(f"Unable to validate {new_url}")
+            return
 
-                branches_dialog = TableBranchView(self, branches=all_active_branches)
-                selected_branches = entry_item.get_branches()
-                logger.debug(f"{selected_branches=}")
-                branches_dialog.set_selected_values(selected_branches)
+        if self.entry_exists(new_url):
+            self.tell(f"{new_url} already exists.")
+            return
 
-                branches_dialog.exec()
+        entry_item.set_url(new_url)
+        self.repos[row] = Repository(new_url)
+        entry_item.set_branch_count(self.repos[row].branch_count(self.repos_backup_path))
 
-                # Set the ones that were active
-                entry_item.set_branches(branches_dialog.get_selected_values())
-                entry_item.set_branches_label_text(
-                    f"{len(entry_item.get_branches())} ({len(entry_repo.active_branches_str)})"
-                )
-                logger.debug(f"{entry_item.get_branches()=}")
+        # Move the saved entry to the new URL, otherwise the old one comes back on next launch
+        self.settings.remove_repo(entry_url)
+        self.settings.save_repo(new_url, entry_item.get_pull())
+
+        logger.info(f"Edited {entry_url} to {new_url}")
+        self.tell(f"Edited {entry_url} to {new_url}")
 
     def iter_entries(self):
         """Yield existing UrlEntry objects."""
@@ -481,29 +431,20 @@ class GitDatBackUI(QWidget):
                         repo_locations.append(str(p))
                 repo_locations = [Path(loc) for loc in repo_locations]
 
+                repo = Repository(url)
                 for loc_path in repo_locations:
-                    owner, name = parse_owner_name_from_url(url)
-                    backup = loc_path / f"backup-{name}"
-                    clone = loc_path / name
+                    # Current backup, then folders left behind by the old working-copy layout
+                    targets = [repo.backup_path(loc_path), loc_path / repo.name, loc_path / f"backup-{repo.name}"]
 
-                    logger.debug(f"{backup=}")
-                    logger.debug(f"{clone=}")
+                    for target in targets:
+                        if target.exists():
+                            logger.info(f"Removing {target}")
+                            remove_dir(target)
 
-                    if backup.exists():
-                        logger.info(f"Attempting to remove backup directory {backup}")
-                        try:
-                            shutil.rmtree(backup)
-                            logger.info(f"Removed backup directory {backup}")
-                        except Exception as e:
-                            logger.error(f"Error removing backup directory {backup}: {e}")
-
-                    if clone.exists():
-                        logger.info(f"Attempting to remove clone directory {clone}")
-                        try:
-                            shutil.rmtree(clone)
-                            logger.info(f"Removed clone directory {clone}")
-                        except Exception as e:
-                            logger.error(f"Error removing clone directory {clone}: {e}")
+                    # Tidy the owner folder once its last backup is gone
+                    owner_dir = repo.backup_path(loc_path).parent
+                    if owner_dir.is_dir() and not any(owner_dir.iterdir()):
+                        owner_dir.rmdir()
 
         # Remove from UI
         for index in sorted(selected, reverse=True):
@@ -554,18 +495,21 @@ class GitDatBackUI(QWidget):
 
         if choice:
             self.backup_path_input.setText(choice)
-            self.set_backup_path()
+            self.set_backup_path(choice)
         else:
             logger.info(f"User aborted backup path selection.")
 
-    def set_backup_path(self):
-        choice = self.backup_path_input.text()
+    def set_backup_path(self, path: str | Path = None):
+        if path is not None:  # Use provided path as choice
+            choice = Path(path) if not isinstance(path, Path) else path
+            choice = choice.resolve()
+        else:  # Use path written in QLineEdit
+            choice = Path(self.backup_path_input.text()).resolve()
 
         if choice:
-            folder_path = Path(self.backup_path_input.text()).resolve()
-            self.backup_path_input.setText(str(folder_path))
-            self.repos_backup_path = folder_path
-            logger.info(f"Backup path: {folder_path}")
+            self.backup_path_input.setText(str(choice))
+            self.repos_backup_path = choice
+            logger.info(f"Backup path: {choice}")
 
     def tell(self, what: str):
         self.info_label.setText(what.strip())
@@ -594,12 +538,12 @@ class GitDatBackUI(QWidget):
             return
 
         if not DRY_RUN:
-            self.tell(f"Cloning {len(repos)} repositories")
+            self.tell(f"Backing up {len(repos)} repositories")
         else:
-            self.tell(f"[DRY_RUN] Cloning {len(repos)} repositories")
+            self.tell(f"[DRY_RUN] Backing up {len(repos)} repositories")
 
         for repo, entry in repos:
-            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry, collect_branches=True)
+            clone_task = CloneRepoTask(repo, self.repos_backup_path, entry)
             logger.debug(f"Task {entry.get_url()}")
 
             # Connect the signals
@@ -619,27 +563,24 @@ class GitDatBackUI(QWidget):
 
         saved_repos = settings.get_repos()
         save_to = settings.get_save_root_dir()
-        logger.info(f"Cloning to root directory: {str(save_to)}")
+        logger.info(f"Backing up to root directory: {str(save_to)}")
 
         logger.info("Iterating saved repos...")
         for url, info in saved_repos.items():
             logger.info(f"{url}")
             logger.info(f"{info=}")
             if info.get(settings.KEY_DO_PULL, False):
-                # Same lookup as the UI, so existing clones are found and updated in place
-                repos.append(Repository(url, destination_root=save_to))
+                repos.append(Repository(url))
                 logger.info(f"Collected repo {url}")
 
         # Function to clone a repository and update the settings
         def clone_and_update_repo(repo: Repository):
-            repo.clone_from(save_to)
-            if not repo.last_clone_ok:
-                raise RuntimeError("Clone or update failed after all retries")
+            if not repo.backup(save_to):
+                raise RuntimeError("Backup failed after all retries")
             url = repo.url
             do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
             timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-            branches = saved_repos[url].get(settings.KEY_BRANCHES, [])
-            settings.save_repo(url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+            settings.save_repo(url, do_pull=do_pull, timestamp=timestamp)
             # Add to repo locations
             settings.add_repo_locations(url, save_to)
             logger.info(f"Finished processing {url}")
@@ -681,13 +622,13 @@ class GitDatBackUI(QWidget):
         self.set_button_state(self.pull_button, state)
 
     def on_clone_success(self, repo_url):
-        logger.info(f"Cloning completed for: {repo_url}")
+        logger.info(f"Backup completed for: {repo_url}")
 
         for entry, repo in zip(self.entries, self.repos):
             if entry.get_url() == repo_url:
                 entry.set_timestamp_now()
                 entry.set_status(entry.status_finished)
-                entry.set_branches_label_text(f"{len(entry.get_branches())} ({len(repo.active_branches_str)})")
+                entry.set_branch_count(repo.branch_count(self.repos_backup_path))
 
         # Add to repo locations
         self.settings.add_repo_locations(repo_url, self.repos_backup_path)
@@ -704,7 +645,7 @@ class GitDatBackUI(QWidget):
 
     def on_clone_error(self, repo_name, error_msg):
         # logger.error(f"Error cloning repository {repo_name}: {error_msg}")
-        self.tell(f"Error cloning {repo_name}: {error_msg}")
+        self.tell(f"Error backing up {repo_name}: {error_msg}")
 
         for entry in self.iter_entries():
             if entry.get_url() == repo_name:
@@ -715,7 +656,7 @@ class GitDatBackUI(QWidget):
             self._on_all_clones_done()
 
     def _on_all_clones_done(self):
-        self.tell("Cloning completed")
+        self.tell("Backup completed")
         self.set_buttons_state_while_task(True)
         # Save now so pull results survive a crash before the window closes
         self.save_state()
@@ -804,13 +745,12 @@ class GitDatBackUI(QWidget):
         # Save state of each widget entry in the table
         for entry in self.iter_entries():
             repo_url = entry.url_label.text()
-            branches = entry.branches_to_pull
             do_pull = entry.pull_checkbox.isChecked()
             timestamp = entry.timestamp_label.text()
             if timestamp in ["n/a", "Fetching..."] or not timestamp:
                 timestamp = ""
 
-            self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp, branches=branches)
+            self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp)
 
         # Save the window size
         width = self.frameGeometry().width()
@@ -831,8 +771,3 @@ class GitDatBackUI(QWidget):
         if screen_info[0] <= 2000 or screen_info[1] <= 1200 or screen_info[2] <= 0.7:
             logger.info("Resizing application")
             self.resize(QSize(650, 500))
-
-
-def clone_all_task(repo: Repository, to: Path):
-    repo.clone_from(to)
-    # repo.clone_branches()

@@ -1,11 +1,13 @@
-from queue import Queue
+import logging
 import threading
+from queue import Queue
 from time import sleep
-from PySide6.QtCore import QRunnable, QThread, QThreadPool, QObject
+
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool
+
+from defines import MAX_CONCURRENT_TASKS
 
 from .clone_repo_task import CloneRepoTask
-from conf_globals import MAX_CONCURRENT_TASKS
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,7 @@ class TaskQueue(QObject):
         self.queue = Queue()
         self.thread_pool = QThreadPool()
         self.is_running = True
-        
+
         self.worker_thread = QThread()
         self.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.process_tasks)
@@ -30,7 +32,7 @@ class TaskQueue(QObject):
     def get_ongoing_tasks(cls) -> int:
         with cls._task_lock:
             return cls._ongoing_tasks
-        
+
     @classmethod
     def increment_ongoing_tasks(cls) -> bool:
         with cls._task_lock:
@@ -38,7 +40,7 @@ class TaskQueue(QObject):
                 cls._ongoing_tasks += 1
                 return True
             return False
-        
+
     @classmethod
     def decrement_ongoing_tasks(cls):
         with cls._task_lock:
@@ -52,7 +54,7 @@ class TaskQueue(QObject):
     def process_tasks(self):
         while self.is_running:
             if self.queue.qsize() == 0:
-                sleep(1) # Prevent busy waiting
+                sleep(1)  # Prevent busy waiting
                 continue
 
             try:
@@ -66,6 +68,7 @@ class TaskQueue(QObject):
 
                     # Wrap run method to handle completion
                     original_run = task.run
+
                     def wrapped_run():
                         try:
                             original_run()
@@ -83,7 +86,9 @@ class TaskQueue(QObject):
                     sleep(0.5)
                 else:
                     # If we can't process now, wait before trying again
-                    logger.debug(f"Max concurrent tasks reached ({self.MAX_CONCURRENT_TASKS}). Tasks in queue: {self.queue.qsize()}")
+                    logger.debug(
+                        f"Max concurrent tasks reached ({self.MAX_CONCURRENT_TASKS}). Tasks in queue: {self.queue.qsize()}"
+                    )
                     sleep(1)
                 continue
             except Exception as e:

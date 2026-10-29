@@ -18,12 +18,11 @@ class TableRepoEntry(QWidget):
         self.pull_checkbox_widget = AlignedWidget(self.pull_checkbox)
         self.pull_checkbox.setChecked(True) # Default pull to true
 
-        self.branches_to_pull = []
         
         self.url_label = QLabel(url.strip())
         self.url_label_widget = AlignedWidget(self.url_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
 
-        self.branches_label = QLabel('0')
+        self.branches_label = QLabel("-")
         self.branches_label_widget = AlignedWidget(self.branches_label, alignment=Qt.AlignLeft, margins=(5, 0, 0, 0))
         
         self.timestamp_label = QLabel("n/a")
@@ -84,31 +83,20 @@ class TableRepoEntry(QWidget):
         self.status_label.setText(status)
         logger.info(f"Set status '{status}' of widget {self.status_label} [{self.get_url()}]")
 
-    def get_branches(self) -> list:
-        return self.branches_to_pull
-
-    def set_branches(self, branches_to_set: list):
-        self.branches_to_pull = branches_to_set
-        # self.branches_label.setText(', '.join(self.branches_to_pull))
-        self.branches_label.setText(str(len(self.branches_to_pull)))
-        logger.info(f"Set new branches: {self.branches_to_pull} for {self.url_label.text()}")
-
-    def set_branches_label_text(self, text: str):
-        self.branches_label.setText(str(text))
-        logger.info(f"Set Branches Label text: {str(text)}")
+    def set_branch_count(self, count: int):
+        """Show how many branches the local backup holds. `0` shows a dash: no backup yet."""
+        self.branches_label.setText(str(count) if count else "-")
 
     def props(self) -> dict:
         """Returns the properties that comprise the entry for a saveable format
 
         * `do_pull` Checked state of the checkbox. `True` if checkbox is checked, `False` otherwise
-        * `branches` List of branches to pull from repository
         * `url` URL string
         * `ts` Timestamp string
         """
 
         ret = {
             "do_pull": self.get_pull(),
-            "branches": self.get_branches(),
             "url": self.get_url(),
             "ts": self.get_timestamp()
         }
