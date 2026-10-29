@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import settings
 import systemd
 from defines import DRY_RUN, MAX_CONCURRENT_TASKS, VERSION
 from libgit import (
@@ -29,7 +30,6 @@ from libgit import (
     remove_dir,
     validate_github_url,
 )
-from settings import Settings
 
 from .classes import (
     AlertDialog,
@@ -54,20 +54,12 @@ class GitDatBackUI(QWidget):
 
         super().__init__()
 
-        self.settings = Settings()
-
-        window_size = self.settings.get_window_size()
-        logger.info(f"{window_size=}")
-
-        self.repos_backup_path = self.settings.get_save_root_dir()
+        # Settings manager
+        self.config = settings.get()
 
         # Set app constraints
         self.setWindowTitle(f"Git Dat Back ({self.APP_VERSION_STR})")
-        if not window_size:
-            # Default
-            self.resize(QSize(810, 450))
-        else:
-            self.resize(QSize(window_size[0], window_size[1]))
+        self.resize(QSize(self.config.settings.window_width, self.config.settings.window_height))
 
         # Tasks
         self.task_queue = TaskQueue()
@@ -223,18 +215,14 @@ class GitDatBackUI(QWidget):
 
         self.load_saved_repos()
 
+    @property
+    def repos_backup_path(self) -> Path:
+        """Root folder for backups, always read from settings so there is one source of truth."""
+        return self.config.settings.backup_root_path()
+
     def load_saved_repos(self):
-        if not self.settings:
-            logger.warning(f"No settings class??")
-            return
-
-        repos = self.settings.get_repos()
-
-        for repo_url, info in repos.items():
-            do_pull = info.get(Settings.KEY_DO_PULL)
-            timestamp = info.get(Settings.KEY_LAST_PULLED)
-
-            self.add_to_table(repo_url, do_pull, timestamp)
+        for url, repo_settings in self.config.settings.repos.items():
+            self.add_to_table(url, repo_settings.do_pull, repo_settings.last_pulled)
 
         self.tell("Status: Ready")
 
@@ -257,10 +245,8 @@ class GitDatBackUI(QWidget):
             self.tell(f"Unable to validate {url}")
             return
 
-        entry = self.add_to_table(url, True, "n/a")
-
-        # Save to settings
-        self.settings.save_repo(url, entry.pull_checkbox.isChecked())
+        self.config.repo(url)  # Adds and saves it
+        self.add_to_table(url, True, "n/a")
 
         self.url_input.clear()
 
@@ -277,8 +263,9 @@ class GitDatBackUI(QWidget):
         self.entry_table.setCellWidget(row_pos, 3, entry.timestamp_widget)
         self.entry_table.setCellWidget(row_pos, 4, entry.status_widget)
 
-        # Handle pull checkbox
+        # Handle pull checkbox. Connected after setting it, so loading doesn't write anything
         entry.set_pull(do_pull)
+        entry.pull_checkbox.toggled.connect(lambda checked, e=entry: self._on_pull_toggled(e, checked))
 
         # Handle timestamp
         if timestamp:
@@ -294,6 +281,9 @@ class GitDatBackUI(QWidget):
         self.tell(f"Added entry: {url}")
 
         return entry
+
+    def _on_pull_toggled(self, entry: TableRepoEntry, checked: bool):
+        self.config.repo(entry.get_url()).do_pull = checked
 
     def handle_cell_doubleclick(self, row, col):
         if col != 1:  # Only the URL column is editable
@@ -328,8 +318,7 @@ class GitDatBackUI(QWidget):
         entry_item.set_branch_count(self.repos[row].branch_count(self.repos_backup_path))
 
         # Move the saved entry to the new URL, otherwise the old one comes back on next launch
-        self.settings.remove_repo(entry_url)
-        self.settings.save_repo(new_url, entry_item.get_pull())
+        self.config.rename_repo(entry_url, new_url)
 
         logger.info(f"Edited {entry_url} to {new_url}")
         self.tell(f"Edited {entry_url} to {new_url}")
@@ -410,26 +399,12 @@ class GitDatBackUI(QWidget):
             logger.debug("[remove_selected_entries] MessageBox: Cancel")
             return
 
-        # Now remove from disk
-        persist = []
-
-        # Add the saved location in settings
-        persist.append(self.settings.get_save_root_dir())
-
-        # Add the input field location, in case it is not saved in settings yet
-        if str(self.repos_backup_path) not in persist:
-            persist.append(str(self.repos_backup_path))
-
-        logger.debug(f"{persist=}")
-
         if remove_from_disk:
             for url in urls_to_remove:
-                repo_locations = self.settings.get_repo_locations(url)
-                # Extend make unique and list of Pathlib paths
-                for p in persist:
-                    if str(p) not in repo_locations:
-                        repo_locations.append(str(p))
-                repo_locations = [Path(loc) for loc in repo_locations]
+                # Every root this repo was backed up to, plus the current one
+                saved = self.config.settings.repos.get(url)
+                known = saved.locations if saved else []
+                repo_locations = [Path(loc) for loc in dict.fromkeys([*known, str(self.repos_backup_path)])]
 
                 repo = Repository(url)
                 for loc_path in repo_locations:
@@ -446,25 +421,25 @@ class GitDatBackUI(QWidget):
                     if owner_dir.is_dir() and not any(owner_dir.iterdir()):
                         owner_dir.rmdir()
 
-        # Remove from UI
-        for index in sorted(selected, reverse=True):
-            entry_to_remove = self.entries[index.row()]
-            repo_to_remove = self.repos[index.row()]
-            entry_url = entry_to_remove.get_url()
+        # Remove from UI and settings, with one settings write
+        with self.config.batch():
+            for index in sorted(selected, reverse=True):
+                entry_to_remove = self.entries[index.row()]
+                repo_to_remove = self.repos[index.row()]
 
-            self.settings.remove_repo(entry_url)
+                self.config.remove_repo(entry_to_remove.get_url())
 
-            self.entries.remove(entry_to_remove)
-            self.repos.remove(repo_to_remove)
-            self.entry_table.removeRow(index.row())
+                self.entries.remove(entry_to_remove)
+                self.repos.remove(repo_to_remove)
+                self.entry_table.removeRow(index.row())
 
     def set_selection_selected(self):
         selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
         logger.debug(f"{selected_indices=}")
 
-        for index in selected_indices:
-            entry = self.entries[index]
-            entry.set_pull(True)
+        with self.config.batch():
+            for index in selected_indices:
+                self.entries[index].set_pull(True)
 
         self.tell("Selected selection.")
 
@@ -472,21 +447,23 @@ class GitDatBackUI(QWidget):
         selected_indices = [n.row() for n in self.entry_table.selectionModel().selectedRows()]
         logger.debug(f"{selected_indices=}")
 
-        for index in selected_indices:
-            entry = self.entries[index]
-            entry.set_pull(False)
+        with self.config.batch():
+            for index in selected_indices:
+                self.entries[index].set_pull(False)
 
         self.tell("Deselected selection.")
 
     def set_all_selected(self):
-        for entry in self.iter_entries():
-            entry.set_pull(True)
+        with self.config.batch():
+            for entry in self.iter_entries():
+                entry.set_pull(True)
 
         self.tell("Selected all.")
 
     def set_all_deselected(self):
-        for entry in self.iter_entries():
-            entry.set_pull(False)
+        with self.config.batch():
+            for entry in self.iter_entries():
+                entry.set_pull(False)
 
         self.tell("Deselected all.")
 
@@ -508,7 +485,7 @@ class GitDatBackUI(QWidget):
 
         if choice:
             self.backup_path_input.setText(str(choice))
-            self.repos_backup_path = choice
+            self.config.settings.backup_root = str(choice)
             logger.info(f"Backup path: {choice}")
 
     def tell(self, what: str):
@@ -557,37 +534,26 @@ class GitDatBackUI(QWidget):
 
     @staticmethod
     def pull_repos_no_ui():
-        repos: list[Repository] = []
+        config = settings.get()
+        save_to = config.settings.backup_root_path()
+        logger.info(f"Backing up to root directory: {save_to}")
 
-        settings = Settings()
+        repos = [Repository(url) for url, repo_settings in config.settings.repos.items() if repo_settings.do_pull]
+        logger.info(f"Collected {len(repos)} repositories to back up")
 
-        saved_repos = settings.get_repos()
-        save_to = settings.get_save_root_dir()
-        logger.info(f"Backing up to root directory: {str(save_to)}")
-
-        logger.info("Iterating saved repos...")
-        for url, info in saved_repos.items():
-            logger.info(f"{url}")
-            logger.info(f"{info=}")
-            if info.get(settings.KEY_DO_PULL, False):
-                repos.append(Repository(url))
-                logger.info(f"Collected repo {url}")
-
-        # Function to clone a repository and update the settings
-        def clone_and_update_repo(repo: Repository):
+        def backup_and_record(repo: Repository):
             if not repo.backup(save_to):
                 raise RuntimeError("Backup failed after all retries")
-            url = repo.url
-            do_pull = saved_repos[url].get(settings.KEY_DO_PULL)
-            timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-            settings.save_repo(url, do_pull=do_pull, timestamp=timestamp)
-            # Add to repo locations
-            settings.add_repo_locations(url, save_to)
-            logger.info(f"Finished processing {url}")
+
+            repo_settings = config.repo(repo.url)
+            with config.batch():
+                repo_settings.last_pulled = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+                repo_settings.add_location(save_to)
+            logger.info(f"Finished processing {repo.url}")
 
         errors = 0
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS) as executor:
-            future_to_repo = {executor.submit(clone_and_update_repo, repo): repo for repo in repos}
+            future_to_repo = {executor.submit(backup_and_record, repo): repo for repo in repos}
 
             for future in as_completed(future_to_repo):
                 repo = future_to_repo[future]
@@ -599,9 +565,9 @@ class GitDatBackUI(QWidget):
 
         # If error margin is below 40%, we set timestamp
         if errors < len(repos) * 0.4:
-            settings.set_last_run(get_current_timestamp())
+            config.settings.last_run = get_current_timestamp()
 
-        settings.save_config()
+        config.save_if_dirty()
         logger.info("Pull Repos No UI finished")
 
     def set_button_state(self, button_widget: QPushButton, state: bool):
@@ -624,18 +590,21 @@ class GitDatBackUI(QWidget):
     def on_clone_success(self, repo_url):
         logger.info(f"Backup completed for: {repo_url}")
 
+        repo_settings = self.config.repo(repo_url)
+
         for entry, repo in zip(self.entries, self.repos):
             if entry.get_url() == repo_url:
                 entry.set_timestamp_now()
                 entry.set_status(entry.status_finished)
                 entry.set_branch_count(repo.branch_count(self.repos_backup_path))
 
-        # Add to repo locations
-        self.settings.add_repo_locations(repo_url, self.repos_backup_path)
+                with self.config.batch():
+                    repo_settings.last_pulled = entry.get_timestamp()
+                    repo_settings.add_location(self.repos_backup_path)
 
         # Check if all done
         if self.check_if_all_completed():
-            self.settings.set_last_run(get_current_timestamp())
+            self.config.settings.last_run = get_current_timestamp()
             self._on_all_clones_done()
 
     def on_clone_status(self, repo_url: str, status: str):
@@ -682,20 +651,24 @@ class GitDatBackUI(QWidget):
             logger.info("Accepted new service settings")
             sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
             logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
-            self.settings.set_schedule_type(sch_type)
-            self.settings.set_scheduled_month(month)
-            self.settings.set_scheduled_month_day(month_day)
-            self.settings.set_scheduled_week_day(week_day)
-            self.settings.set_scheduled_time(time)
+            with self.config.batch() as s:
+                s.schedule_type = sch_type
+                s.schedule_month = month
+                s.schedule_month_day = month_day
+                s.schedule_week_day = week_day
+                s.schedule_time = time
         else:
             logger.info("Cancelled service settings")
 
     def register_background_service(self):
-        schedule_type = self.settings.get_schedule_type()
-        month_day = self.settings.get_scheduled_month_day()
-        month = self.settings.get_scheduled_month()
-        week_day = self.settings.get_scheduled_week_day()
-        time = self.settings.get_scheduled_time()
+        s = self.config.settings
+        schedule_type, month, month_day, week_day, time = (
+            s.schedule_type,
+            s.schedule_month,
+            s.schedule_month_day,
+            s.schedule_week_day,
+            s.schedule_time,
+        )
 
         if week_day or time:
             logger.info(f"Want to register service with custom schedule: {schedule_type} {week_day} - {time}")
@@ -729,7 +702,7 @@ class GitDatBackUI(QWidget):
         sys.exit(self.app.exec())
 
     def closeEvent(self, event):
-        logger.info("Application is closing. Shutting down procedure")
+        logger.info("Application close.")
         self.task_queue.stop()
 
         self.save_state()
@@ -738,26 +711,11 @@ class GitDatBackUI(QWidget):
         event.accept()
 
     def save_state(self):
-        """Write the repo list, backup folder and window size to the settings file."""
-        # Save root directory for repo backups
-        self.settings.set_save_root_dir(self.repos_backup_path)
+        """Store the window size and write any settings not yet on disk."""
+        self.config.settings.window_width = self.frameGeometry().width()
+        self.config.settings.window_height = self.frameGeometry().height() - 36
 
-        # Save state of each widget entry in the table
-        for entry in self.iter_entries():
-            repo_url = entry.url_label.text()
-            do_pull = entry.pull_checkbox.isChecked()
-            timestamp = entry.timestamp_label.text()
-            if timestamp in ["n/a", "Fetching..."] or not timestamp:
-                timestamp = ""
-
-            self.settings.save_repo(repo_url, do_pull=do_pull, timestamp=timestamp)
-
-        # Save the window size
-        width = self.frameGeometry().width()
-        height = self.frameGeometry().height() - 36
-        self.settings.save_window_size(width, height)
-
-        self.settings.save_config()
+        self.config.save_settings()
 
     def _adjust_app_size(self):
         screen_info = get_screen_info(self.app)

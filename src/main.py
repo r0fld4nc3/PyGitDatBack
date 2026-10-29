@@ -1,6 +1,7 @@
 import argparse
 import logging
 
+import settings
 from log import LOG_FILE, configure_logging, reset_log_file
 from ui import GitDatBackUI
 
@@ -18,6 +19,11 @@ def main():
     reset_log_file(LOG_FILE)
     configure_logging(logging.DEBUG if args.debug else logging.INFO, LOG_FILE)
     logger.info(f"Log file: {LOG_FILE}")
+
+    # Load settings once. Everything else uses settings.get()
+    config = settings.init()
+    if config.load_problem:
+        logger.warning(config.load_problem)
 
     if args.no_ui:
         launch_no_ui()

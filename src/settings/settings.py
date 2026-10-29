@@ -1,290 +1,456 @@
+"""
+Application settings, kept in memory and saved to a JSON file.
+
+Explanation:
+- The file is read once at startup (`init()` -> `SettingsManager.load()`).
+- Everything reads and changes the in-memory dataclasses (`AppSettings`, `RepoSettings` in models.py).
+- Changing a plain field saves the whole file right away.
+- Changing a `memory()` field only marks the settings as changed. It is written by the next save, or by `save_if_dirty()`, which runs when the window closes.
+- `batch()` groups many changes into one write, and undoes them all if something inside fails.
+- `snapshot()` / `restore()` undo a set of changes made since the snapshot.
+
+Safety rules:
+- The file is always written and read as UTF-8, regardless of the OS language.
+- Writes are atomic: we write a temp file and swap it in with `os.replace`, so the file on disk is always either the old version or the new one, never half written.
+- One lock covers every change and every save, so threads (ex.: parallel backups) can't interleave writes.
+- A file failed to read is never overwritten. It is renamed to `*.corrupt-<time>` first, and attempted to recover from `*.bak` (a copy of the last file that loaded correctly). If it can't be renamed, saving is turned off for this session.
+"""
+
+import copy
 import json
 import logging
 import os
-import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import MISSING, fields
 from pathlib import Path
-from typing import Union
+from typing import Generator, Optional
 
 from defines import APP_NAME, HOST
-from utils import get_home_folder, get_os_env_config_folder
+from utils import get_os_env_config_folder
+
+from .models import AppSettings, RepoSettings
+
+log = logging.getLogger(__name__)
 
 CONFIG_FOLDER = get_os_env_config_folder() / HOST / APP_NAME
+SETTINGS_FILE_NAME = "pygitdatback-settings-v1.json"
+LEGACY_SETTINGS_FILE_NAME = "pygitdatback-settings-unused.json"
 
-logger = logging.getLogger("Settings")
+_current: Optional["SettingsManager"] = None
 
 
-class Settings:
-    """
-    Singleton-like Settings class for storing and accessing application settings.
-    """
+class SettingsManager:
+    """Owns the in-memory settings and saves them to disk."""
 
-    _instance = None
-    _loaded = False
+    def __init__(self, config_dir: Path = CONFIG_FOLDER, config_file_name: str = SETTINGS_FILE_NAME):
+        self.config_dir = Path(config_dir)
+        self.config_file = self.config_dir / config_file_name
+        self.backup_file = self.config_file.with_name(self.config_file.name + ".bak")
+        self.legacy_file = self.config_dir / LEGACY_SETTINGS_FILE_NAME
 
-    KEY_SAVE_TO = "save_to"
-    KEY_SERVICE_SET = "background_service_set"
-    KEY_SCHEDULED_TYPE = "schedule_type"
-    KEY_SCHEDULED_WEEK_DAY = "schedule_svc_week_day"
-    KEY_SCHEDULED_MONTH_DAY = "schedule_svc_month_day"
-    KEY_SCHEDULED_MONTH = "schedule_svc_month"
-    KEY_SCHEDULED_TIME = "schedule_svc_time"
-    KEY_REPOS = "repos"
-    KEY_DO_PULL = "do_pull"
-    KEY_LAST_PULLED = "last_pulled"
-    KEY_BRANCHES_LEGACY = "branches"  # No longer used. Removed from saved repos on next save
-    KEY_WIN_SIZE = "window_size"
-    KEY_REPO_LOC = "locations"
-    KEY_LAST_RUN = "last_run"
+        # RLock (re-entrant) because a save can happen while the same thread already holds the lock, ex.: assigning a field holds the lock and then saves.
+        self.lock = threading.RLock()
 
-    settings = {
-        KEY_SAVE_TO: "",
-        KEY_SCHEDULED_TYPE: "",
-        KEY_SCHEDULED_MONTH: "",
-        KEY_SCHEDULED_MONTH_DAY: "",
-        KEY_SCHEDULED_WEEK_DAY: "",
-        KEY_SCHEDULED_TIME: "",
-        KEY_SERVICE_SET: False,
-        KEY_REPOS: {},
-        KEY_WIN_SIZE: "",
-        KEY_LAST_RUN: "",
-    }
+        self.settings: AppSettings = self._attach(AppSettings())
+        self._dirty = False  # Something changed in memory that isn't on disk yet
 
-    _config_file_name = "pygitdatback-settings.json"
-    config_dir = Path(CONFIG_FOLDER)
-    config_file = Path(CONFIG_FOLDER) / _config_file_name
+        # Inside batch(): saves are held back until the outermost batch ends
+        self._batch_depth = 0
+        self._save_pending = False
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(Settings, cls).__new__(cls)
-            cls._instance.load_config()
-        return cls._instance
+        self.can_save = True
 
-    def set_save_root_dir(self, p: Union[str, Path]):
-        self.settings[self.KEY_SAVE_TO] = str(p).replace("\\\\", "/").replace("\\", "/")
+        # Message when something went wrong while loading. Empty if all was fine.
+        self.load_problem = ""
 
-    def get_save_root_dir(self, fallback: Union[str, Path] = None) -> str:
-        if fallback is None:
-            fallback = get_home_folder() / HOST / APP_NAME / "Repositories"
-            logger.info(f"No fallback set. Setting to: {fallback}")
+    # ---------- Loading ----------
 
-        path = self.settings.get(self.KEY_SAVE_TO, Path(fallback))
-        logger.info(f"Retrieved path {path}")
+    def load(self) -> bool:
+        """
+        Read settings from disk. Returns True if settings were loaded (or no file yet).
 
-        if not path:
-            # Path could be just empty
-            logger.info(f"Retrieved non sensical path. Setting to fallback {fallback}")
-            path = fallback
+        Never raises: on any problem we fall back to the backup, then to defaults.
+        """
+        with self.lock:
+            # Import old settings
+            if not self.config_file.exists():
+                return self._load_with_legacy()
 
-        self.set_save_root_dir(path)
-        return path
+            data = self._read_json(self.config_file)
+            if data is not None:
+                self.settings = self._from_dict(data)
+                self._dirty = False
+                log.info(f"Loaded settings from {self.config_file}")
+                # Remember the good file in case the next one gets damaged
+                self._write_text_atomic(self.backup_file, json.dumps(data, indent=2, ensure_ascii=False))
+                return True
 
-    def save_repo(self, repo_url, do_pull, timestamp: str = ""):
-        repo_url = str(repo_url).strip()
+            # The file exists but is unusable.
+            log.error(f"Settings file could not be read: {self.config_file}")
+            corrupt_copy = self._move_aside(self.config_file)
+            if corrupt_copy is None:
+                self.can_save = False
+                self.load_problem = (
+                    f"Settings file could not be read:\n{self.config_file}\n\n"
+                    "Default settings will be used and changes will NOT be saved this session, so the file is left unchanged."
+                )
+                return False
 
-        logger.info(f"Save repository {repo_url}: {do_pull=}, {timestamp=}")
+            data = self._read_json(self.backup_file)
+            if data is not None:
+                self.settings = self._from_dict(data)
+                self.save_settings()
+                self.load_problem = (
+                    "Settings file could not be read, settings were restored from the last backup.\n\n"
+                    f"The unreadable file was kept as:\n{corrupt_copy}"
+                )
+                log.warning(f"Restored settings from backup: {self.backup_file}")
+                return True
 
-        repos = self.settings.setdefault(self.KEY_REPOS, {})
-
-        if repo_url not in repos:
-            repos[repo_url] = {
-                self.KEY_DO_PULL: do_pull,
-                self.KEY_LAST_PULLED: timestamp,
-                self.KEY_REPO_LOC: [],
-            }
-        else:
-            repos[repo_url][self.KEY_DO_PULL] = do_pull
-            if timestamp:
-                repos[repo_url][self.KEY_LAST_PULLED] = timestamp
-            repos[repo_url].pop(self.KEY_BRANCHES_LEGACY, None)
-
-    def remove_repo(self, repo_url) -> bool:
-        repo_url = str(repo_url).strip()
-
-        logger.info(f"Remove repository {repo_url}")
-
-        if self.KEY_REPOS not in self.settings:
-            logger.error(f"Key {self.KEY_REPOS} not present.")
+            self.load_problem = (
+                "Settings file could not be read and no usable backup was found. "
+                "Default settings are used.\n\n"
+                f"The unreadable file was kept as:\n{corrupt_copy}"
+            )
+            log.warning(self.load_problem)
             return False
 
-        if repo_url in self.settings[self.KEY_REPOS]:
-            del self.settings[self.KEY_REPOS][repo_url]
-            logger.info(f"Successfully removed {repo_url}")
-        else:
-            return False
+    def _load_with_legacy(self) -> bool:
+        """Carry settings over from the old file, if there is one."""
 
+        # Settings carryover disabled for now
+        """
+        if not self.legacy_file.exists():
+            log.info(f"No settings file yet, using defaults: {self.config_file}")
+            return True
+
+        data = self._read_json(self.legacy_file)
+        if data is None:
+            log.warning(f"Old settings file could not be read, using defaults: {self.legacy_file}")
+            return True
+
+        self.settings = self._from_dict(_migrate_legacy(data))
+        log.info(f"Moved settings from {self.legacy_file} to {self.config_file}.")
+        """
+        self.save_settings()
         return True
 
-    def get_repos(self) -> dict:
-        return self.settings.get(self.KEY_REPOS, {})
+    def _read_json(self, fp: Path) -> Optional[dict]:
+        """Read a JSON object from a file. Returns None if missing, empty or invalid."""
+        try:
+            # "utf-8-sig" is UTF-8 that also accepts a leading BOM (some editors add one)
+            data = json.loads(fp.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            log.error(f"Could not read '{fp}': {e}")
+            return None
 
-    def save_window_size(self, width: int, height: int):
-        self.settings[self.KEY_WIN_SIZE] = [width, height]
+        if not isinstance(data, dict):
+            log.error(f"'{fp}' does not contain a JSON object.")
+            return None
 
-    def get_window_size(self) -> list:
-        width_height = self.settings.get(self.KEY_WIN_SIZE, [])
-        logger.info(f"{width_height=}")
-        return width_height
+        return data
 
-    def save_config(self) -> Path:
-        if self.config_dir == "" or not Path(self.config_dir).exists():
-            os.makedirs(self.config_dir, exist_ok=True)
-            logger.info(f"Generated config folder {self.config_dir}")
+    def _move_aside(self, fp: Path) -> Optional[Path]:
+        """Rename a bad file to '<name>.corrupt-<time>'. Returns the new path, or None on failure."""
+        target = fp.with_name(f"{fp.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            os.replace(fp, target)
+        except OSError as e:
+            log.error(f"Could not move unreadable settings file aside: {e}")
+            return None
+        log.info(f"Kept unreadable settings file as: {target}")
+        return target
 
-        with open(self.config_file, "w", encoding="utf-8") as config_file:
-            config_file.write(json.dumps(self.settings, indent=2))
-            logger.info(f"Saved config {self.config_file}")
+    def _from_dict(self, data: dict) -> AppSettings:
+        """Build AppSettings from a dict, one field at a time. A bad value only resets that field."""
+        settings = _dataclass_from_dict(AppSettings, data)
 
-        return self.config_file
+        repos_data = data.get("repos", {})
+        if not isinstance(repos_data, dict):
+            log.warning(f"Ignoring invalid 'repos' value in settings: {repos_data!r}")
+            repos_data = {}
 
-    def get_background_service_status(self) -> bool:
-        return self.settings.get(self.KEY_SERVICE_SET)
+        for url, repo_data in repos_data.items():
+            url = url.strip() if isinstance(url, str) else ""
+            if not url or not isinstance(repo_data, dict):
+                log.warning(f"Skipping invalid repository entry '{url}': {repo_data!r}")
+                continue
+            settings.repos[url] = self._attach(_dataclass_from_dict(RepoSettings, repo_data))
 
-    def set_background_service_status(self, status: bool):
-        self.settings[self.KEY_SERVICE_SET] = status
-        logger.info(f"Set background service status to: {status}")
+        return self._attach(settings)
 
-    def get_schedule_type(self) -> str:
-        return self.settings.get(self.KEY_SCHEDULED_TYPE, "")
+    # ---------- Saving ----------
 
-    def set_schedule_type(self, schedule_type: str):
-        self.settings[self.KEY_SCHEDULED_TYPE] = schedule_type
-        logger.info(f"Set schedule type: {schedule_type}")
+    def _on_change(self, save_now: bool):
+        """
+        Called on every field change (with the lock held).
 
-    def get_scheduled_week_day(self) -> str:
-        return self.settings.get(self.KEY_SCHEDULED_WEEK_DAY, "")
+        save_now=True:  plain field. Save now.
+        save_now=False: memory() field. Only remember that something changed.
+        """
+        self._dirty = True
+        if save_now:
+            self.save_settings()
 
-    def set_scheduled_week_day(self, day: str):
-        logger.info(f"Set Scheduled Day to {day}")
-        self.settings[self.KEY_SCHEDULED_WEEK_DAY] = day
+    def save_if_dirty(self) -> bool:
+        """Write the settings only if something changed since the last save. Thread-safe."""
+        with self.lock:
+            if not self._dirty:
+                return True
+            return self.save_settings()
 
-    def get_scheduled_month_day(self) -> str:
-        return self.settings.get(self.KEY_SCHEDULED_MONTH_DAY, "")
+    def save_settings(self) -> bool:
+        """Write the current settings to disk. Thread-safe."""
+        with self.lock:
+            if self._batch_depth:
+                # Write once when the batch ends
+                self._save_pending = True
+                return True
 
-    def set_scheduled_month_day(self, day: str):
-        logger.info(f"Set Scheduled Month Day to {day}")
-        self.settings[self.KEY_SCHEDULED_MONTH_DAY] = day
+            if not self.can_save:
+                log.warning("Saving is disabled this session (settings file was unreadable).")
+                return False
 
-    def get_scheduled_month(self) -> int:
-        return self.settings.get(self.KEY_SCHEDULED_MONTH, 1)
+            text = json.dumps(self._to_dict(), indent=2, ensure_ascii=False)
+            if not self._write_text_atomic(self.config_file, text):
+                return False
 
-    def set_scheduled_month(self, month: int):
-        logger.info(f"Set Scheduled Month to {month}")
-        self.settings[self.KEY_SCHEDULED_MONTH] = month
+            self._dirty = False
+            log.debug(f"Saved settings to {self.config_file}")
+            return True
 
-    def get_scheduled_time(self) -> str:
-        return self.settings.get(self.KEY_SCHEDULED_TIME, "")
+    def _to_dict(self) -> dict:
+        """Turn settings into a plain dict for JSON. Call while holding the lock."""
+        data = _dataclass_to_dict(self.settings)
+        data["repos"] = {url: _dataclass_to_dict(repo) for url, repo in self.settings.repos.items()}
+        return data
 
-    def set_scheduled_time(self, time: str) -> str:
-        logger.info(f"Set Scheduled Time to {time}")
-        self.settings[self.KEY_SCHEDULED_TIME] = time
+    def _write_text_atomic(self, fp: Path, text: str) -> bool:
+        """
+        Write text to a file, never leaving it half-written.
 
-    def add_repo_locations(self, url, locations: list):
-        logger.info(f"Set locations for repository {url}")
+        Write to a temp file in the same folder, flush to disk, then swap it into place,
+        which is atomic on Windows, Linux and macOS with `os.replace()`.
+        """
+        fp.parent.mkdir(parents=True, exist_ok=True)
 
-        if not isinstance(locations, list):
-            locations = [str(locations)]
+        fd, temp_path = tempfile.mkstemp(dir=fp.parent, prefix=fp.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
 
-        repo = self.settings[self.KEY_REPOS].get(url)
-
-        if not repo:
-            logger.info(f"No repository present: {url}")
-            return []
-
-        repo_locations: list = repo.get(self.KEY_REPO_LOC, [])
-
-        # Extend avoid duplicates
-        repo_locations.extend([str(loc) for loc in locations if str(loc) not in repo_locations])
-
-        self.settings[self.KEY_REPOS][url][self.KEY_REPO_LOC] = repo_locations
-
-        logger.info(f"New repository locations: {repo_locations}")
-
-    def get_repo_locations(self, url) -> list:
-        logger.info(f"Getting locations for repository {url}")
-
-        repo = self.settings[self.KEY_REPOS].get(url)
-        if not repo:
-            logger.info(f"Unable to obtain repository: {url}")
-            return []
-
-        locations = repo.get(self.KEY_REPO_LOC, [])
-
-        logger.info(f"Repository locations: {locations}")
-
-        return locations
-
-    def get_last_run(self) -> str:
-        last_run = self.settings.get(self.KEY_LAST_RUN, "")
-        logger.info(f"Got last run timestamp: {last_run}")
-        return last_run
-
-    def set_last_run(self, ts: str):
-        self.settings[self.KEY_LAST_RUN] = ts
-        logger.info(f"Set last run timestamp to: {ts}")
-
-    def load_config(self) -> dict:
-        logger.info(f"{CONFIG_FOLDER=}")
-
-        if not self._loaded:
-            if self.config_dir == "" or not Path(self.config_dir).exists() or not Path(self.config_file).exists():
-                logger.debug(f"Config does not exist.")
-                return self.settings
-
-            self.clean_save_file()
-
-            logger.debug(f"Loading config {self.config_file}")
-            config_error = False
-            with open(self.config_file, "r", encoding="utf-8") as config_file:
+            # On Windows the target can be briefly locked (antivirus, indexer). Retry a few times.
+            for attempt in range(3):
                 try:
-                    self.settings = json.load(config_file)
-                except Exception as e:
-                    logger.error("An error occurred trying to read config file.")
-                    logger.error(e)
-                    config_error = True
+                    os.replace(temp_path, fp)
+                    return True
+                except PermissionError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.1)
+        except Exception as e:
+            log.error(f"Could not write '{fp}': {e}")
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        return False
 
-            if config_error:
-                logger.info("Generating new config file.")
-                with open(self.config_file, "w", encoding="utf-8") as config_file:
-                    config_file.write(json.dumps(self.settings, indent=2))
-            logger.debug(self.settings)
+    # ---------- Batches and snapshots ----------
 
-            self._loaded = True
-
-        return self.settings
-
-    def get_config_dir(self) -> Path:
-        if not self.config_dir or not Path(self.config_dir).exists:
-            return Path(os.path.dirname(sys.executable))
-
-        return self.config_dir
-
-    def clean_save_file(self) -> bool:
+    @contextmanager
+    def batch(self) -> Generator[AppSettings]:
         """
-        Removes unused keys from the save file.
-        :return: `bool`
+        Effect many changes with a single write at the end:
+
+            with manager.batch() as s:
+                s.schedule_type = "weekly"
+                s.schedule_time = "18:00:00"
+
+        If anything inside raises, every change made in the batch is undone and nothing is written.
+        Batches can be nested but only the outermost one writes or rolls back.
+        Other threads wait while a batch is open.
         """
+        with self.lock:
+            outermost = self._batch_depth == 0
+            before = self.snapshot() if outermost else None
+            dirty_before = self._dirty
+            self._batch_depth += 1
 
-        if not self.config_dir or not Path(self.config_dir).exists():
-            logger.info("No config folder found.")
-            return False
+            try:
+                yield self.settings
+            except BaseException:
+                self._batch_depth -= 1
+                if outermost:
+                    self._save_pending = False
+                    self.settings = self._from_dict(before)
+                    self._dirty = dirty_before
+                    log.warning("Settings batch failed. Its changes were undone.")
+                raise
 
-        if not self.config_file.exists():
-            logger.info("No config file to cleanup")
-            return False
+            self._batch_depth -= 1
+            if outermost and self._save_pending:
+                self._save_pending = False
+                self.save_settings()
 
-        with open(self.config_file, "r", encoding="utf-8") as config_file:
-            settings = dict(json.load(config_file))
-            logger.info(f"[clean_save_file] Loaded settings: {json.dumps(settings, indent=2)}")
+    def snapshot(self) -> dict:
+        """Copy of the current settings. Passed to `restore()` to undo every change made since."""
+        with self.lock:
+            return copy.deepcopy(self._to_dict())
 
-        for setting in reversed(list(settings.keys())):
-            if setting not in self.settings.keys():
-                settings.pop(setting)
-                logger.debug(f"Cleared unused settings key: {setting}")
+    def restore(self, snapshot: dict) -> None:
+        """
+        Put back settings from `snapshot()` and save. No effect if nothing changed.
 
-        with open(self.config_file, "w", encoding="utf-8") as config_file:
-            config_file.write(json.dumps(settings, indent=2))
-            logger.debug(f"Saved cleaned config: {self.config_file}")
+        Settings objects fetched earlier (ex.: from `repo()`) are replaced. Must be fetched again after.
+        """
+        with self.lock:
+            if self._to_dict() == snapshot:
+                log.debug("Settings already match the snapshot. Nothing to restore.")
+                return
+            self.settings = self._from_dict(copy.deepcopy(snapshot))
+            self._dirty = True
+            self.save_settings()
+            log.info("Restored settings from snapshot.")
 
-        logger.info("Cleaned-up saved file")
+    # ---------- Repositories ----------
 
-        return True
+    def repo(self, url: str) -> RepoSettings:
+        """Get the settings for a repository, adding it (and saving) if it isn't stored yet."""
+        url = url.strip()
+        if not url:
+            # Never store an entry without a URL. Hand back a detached object so callers don't crash.
+            log.warning("Requested repository settings with an empty URL; not saving it.")
+            return RepoSettings()
+
+        with self.lock:
+            if url not in self.settings.repos:
+                self.settings.repos[url] = self._attach(RepoSettings())
+                self._on_change(save_now=True)
+            return self.settings.repos[url]
+
+    def has_repo(self, url: str) -> bool:
+        return url.strip() in self.settings.repos
+
+    def remove_repo(self, url: str) -> bool:
+        with self.lock:
+            if self.settings.repos.pop(url.strip(), None) is None:
+                return False
+            self._on_change(save_now=True)
+            return True
+
+    def rename_repo(self, old_url: str, new_url: str) -> RepoSettings:
+        """Move a repository's settings to a new URL, keeping its order in the list."""
+        old_url, new_url = old_url.strip(), new_url.strip()
+
+        with self.lock:
+            if old_url not in self.settings.repos or old_url == new_url:
+                return self.repo(new_url)
+
+            self.settings.repos = {
+                (new_url if url == old_url else url): repo for url, repo in self.settings.repos.items()
+            }
+            return self.settings.repos[new_url]
+
+    def _attach(self, obj):
+        """Link a settings object to this manager so changes to it get saved."""
+        obj._manager = self
+        return obj
+
+
+# ---------- Dataclass <-> dict helpers ----------
+
+
+def _dataclass_from_dict(cls, data: dict):
+    """
+    Create `cls` from `data`, checking each field's type against its default value.
+    Missing or wrongly typed values keep the default. Unknown keys are kept in `_unknown`.
+    Locked fields always keep their default value(s) and are ignored but still written.
+    """
+    obj = cls()
+    known = set()
+
+    for f in fields(cls):
+        if f.name.startswith("_"):
+            continue
+        known.add(f.name)
+
+        if f.name == "repos" or f.name not in data:
+            continue  # repos are handled by the caller
+
+        if cls._is_locked_field(f.name):
+            continue
+
+        value = data[f.name]
+        default = f.default if f.default is not MISSING else f.default_factory()
+
+        if type(value) is not type(default):
+            log.warning(f"Ignoring setting '{f.name}' with unexpected value {value!r}. Using default.")
+            continue
+
+        setattr(obj, f.name, value)
+
+    obj._unknown = {k: v for k, v in data.items() if k not in known}
+    return obj
+
+
+def _dataclass_to_dict(obj) -> dict:
+    """Public fields of a settings dataclass, plus any unknown keys we read from the file."""
+    data = dict(obj._unknown)
+    for f in fields(obj):
+        if not f.name.startswith("_") and f.name != "repos":
+            value = getattr(obj, f.name)
+            data[f.name] = list(value) if isinstance(value, list) else value
+    return data
+
+
+def _migrate_legacy(old: dict) -> dict:
+    """Convert the pre-0.1.0 settings layout to the current field names."""
+    renames = {
+        "save_to": "backup_root",
+        "schedule_type": "schedule_type",
+        "schedule_svc_week_day": "schedule_week_day",
+        "schedule_svc_month": "schedule_month",
+        "schedule_svc_month_day": "schedule_month_day",
+        "schedule_svc_time": "schedule_time",
+        "last_run": "last_run",
+    }
+    data = {new: old[key] for key, new in renames.items() if key in old}
+
+    window = old.get("window_size")
+    if isinstance(window, list) and len(window) == 2:
+        data["window_width"], data["window_height"] = window
+
+    data["repos"] = {
+        url: {key: value for key, value in info.items() if key in ("do_pull", "last_pulled", "locations")}
+        for url, info in old.get("repos", {}).items()
+        if isinstance(info, dict)
+    }
+    return data
+
+
+# ---------- Module access ----------
+
+
+def init(config_dir: Path = CONFIG_FOLDER) -> SettingsManager:
+    """Create the settings manager and load the file. Call once at startup."""
+    global _current
+
+    if _current is None:
+        _current = SettingsManager(config_dir)
+        _current.load()
+
+    return _current
+
+
+def get() -> SettingsManager:
+    if _current is None:
+        raise RuntimeError("Settings are not initialised. Call settings.init() first.")
+    return _current

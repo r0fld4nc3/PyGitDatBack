@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QSize
 
 import logging
-from settings import Settings
+import settings
 import systemd
 
 logger = logging.getLogger(__name__)
@@ -18,13 +18,13 @@ class ServiceConfigWindow(QDialog):
         self.setModal(True) # Blocks interaction with parent window
         self.resize(QSize(300, 200))
 
-        self.settings = Settings()
+        s = settings.get().settings
 
-        self.selected_type = self.settings.get_schedule_type()
-        self.selected_week_day = self.settings.get_scheduled_week_day()
-        self.selected_month_day = self.settings.get_scheduled_month_day()
-        self.selected_month = self.settings.get_scheduled_month()
-        self.selected_time = self.settings.get_scheduled_time()
+        self.selected_type = s.schedule_type
+        self.selected_week_day = s.schedule_week_day
+        self.selected_month_day = s.schedule_month_day
+        self.selected_month = s.schedule_month
+        self.selected_time = s.schedule_time
         self.selected_hour = self.selected_time.split(':')[0]
         self.selected_min = self.selected_time.split(':')[1] if len(self.selected_time) > 1 else ''
 
