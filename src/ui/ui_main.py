@@ -239,6 +239,9 @@ class GitDatBackUI(QWidget):
         dialog = RepoSettingsDialog(self)
         dialog.exec()
 
+        # Update thread pool count after.
+        self.thread_pool.setMaxThreadCount(self.config.settings.max_concurrent_tasks)
+
     @staticmethod
     def _button(text: str, slot: Callable, fixed: bool = False) -> QPushButton:
         button = QPushButton(text)
