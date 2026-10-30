@@ -50,7 +50,7 @@ from .classes import (
     TableRepoEntry,
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 SETTINGS_BUTTON_SIZE = 32  # px, square
 SETTINGS_ICON_SIZE = 20  # px, for the future cogwheel image
@@ -276,7 +276,7 @@ class GitDatBackUI(QWidget):
             try:
                 self.add_repo_row(url, repo_settings.do_pull, repo_settings.last_pulled)
             except ValueError as e:
-                logger.warning(f"Skipping saved repository: {e}")
+                log.warning(f"Skipping saved repository: {e}")
 
         self.tell("Status: Ready")
         self.url_input.clear()
@@ -290,7 +290,7 @@ class GitDatBackUI(QWidget):
 
         target = parse_github_url(url)
         if target is None:
-            logger.info(f"Unable to validate URL: {url}")
+            log.info(f"Unable to validate URL: {url}")
             self.tell(f"Unable to validate {url}")
             return
 
@@ -355,7 +355,7 @@ class GitDatBackUI(QWidget):
 
         self.entries.insert(row_pos, entry)
 
-        logger.info(f"Added entry: {entry.get_url()}")
+        log.info(f"Added entry: {entry.get_url()}")
         self.tell(f"Added entry: {entry.get_url()}")
         return entry
 
@@ -406,7 +406,7 @@ class GitDatBackUI(QWidget):
         dialog = RepoPickerDialog(self, entry.key, self.repos_backup_path, account.skipped, account.include_forks)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            logger.info(f"Kept repository choices for {entry.key}")
+            log.info(f"Kept repository choices for {entry.key}")
             return
 
         with self.config.batch():
@@ -433,7 +433,7 @@ class GitDatBackUI(QWidget):
 
         target = parse_github_url(new_url)
         if target is None:
-            logger.info(f"Unable to validate URL: {new_url}")
+            log.info(f"Unable to validate URL: {new_url}")
             self.tell(f"Unable to validate {new_url}")
             return
 
@@ -461,7 +461,7 @@ class GitDatBackUI(QWidget):
         converted_to_what = (
             f"to an account ({new_key})" if converted and new_entry.is_account else f"to {new_entry.get_url()}"
         )
-        logger.info(f"Edited {old_url} {converted_to_what}")
+        log.info(f"Edited {old_url} {converted_to_what}")
         self.tell(f"Changed {old_url} {converted_to_what}")
 
         # Let user edit repositories as if adding an account
@@ -494,7 +494,7 @@ class GitDatBackUI(QWidget):
         selected = self.entry_table.selectionModel().selectedRows()
 
         if not selected:
-            logger.info("Nothing selected to remove.")
+            log.info("Nothing selected to remove.")
             return
 
         display_cap = 20
@@ -509,7 +509,7 @@ class GitDatBackUI(QWidget):
         query_ans = qm.question(self, "Remove from Disk?", query, qm.Yes | qm.No | qm.Cancel)
 
         if query_ans not in (qm.Yes, qm.No):
-            logger.debug("[remove_selected_entries] MessageBox: Cancel")
+            log.debug("[remove_selected_entries] MessageBox: Cancel")
             return
 
         if query_ans == qm.Yes:
@@ -549,7 +549,7 @@ class GitDatBackUI(QWidget):
                 if entry.is_account:
                     for name in existing_backups(loc_path, entry.key):
                         if (entry.key, name) in staying_repo_names:
-                            logger.info(f"Keeping {entry.key}/{name}: it is also added on its own")
+                            log.info(f"Keeping {entry.key}/{name}: it is also added on its own")
                             continue
                         remove_dir(Repository.of(entry.key, name).backup_path(loc_path))
                     tidy_owner_dir(owner_backup_dir(loc_path, entry.key))
@@ -557,13 +557,13 @@ class GitDatBackUI(QWidget):
 
                 repo = entry.repo
                 if repo.owner in staying_accounts:
-                    logger.info(f"Keeping {repo.owner}/{repo.name}: it is still backed up as part of the account")
+                    log.info(f"Keeping {repo.owner}/{repo.name}: it is still backed up as part of the account")
                     continue
 
                 # Current backup, then folders left behind by the old working-copy layout
                 for target in (repo.backup_path(loc_path), loc_path / repo.name, loc_path / f"backup-{repo.name}"):
                     if target.exists():
-                        logger.info(f"Removing {target}")
+                        log.info(f"Removing {target}")
                         remove_dir(target)
                 tidy_owner_dir(repo.backup_path(loc_path).parent)
 
@@ -576,7 +576,7 @@ class GitDatBackUI(QWidget):
             self.backup_path_input.setText(choice)
             self.set_backup_path(choice)
         else:
-            logger.info("User aborted backup path selection.")
+            log.info("User aborted backup path selection.")
 
     def set_backup_path(self, path: str | Path = None):
         # Use the given path, or what is written in the text field
@@ -584,7 +584,7 @@ class GitDatBackUI(QWidget):
 
         self.backup_path_input.setText(str(choice))
         self.config.settings.backup_root = str(choice)
-        logger.info(f"Backup path: {choice}")
+        log.info(f"Backup path: {choice}")
 
     def tell(self, what: str):
         self.info_label.setText(what.strip())
@@ -651,7 +651,7 @@ class GitDatBackUI(QWidget):
         self.on_account_planned(entry, AccountPlan(entry.key, listing_error=f"Unexpected error: {error}"))
 
     def _on_backup_task_done(self, task: BackupTask, _repo):
-        logger.info(f"Backup completed for: {task.repo.url}")
+        log.info(f"Backup completed for: {task.repo.url}")
         self._on_backup_result(task.repo.url, ok=True)
 
     def _on_backup_task_failed(self, task: BackupTask, error: Exception):
@@ -729,13 +729,13 @@ class GitDatBackUI(QWidget):
         self.save_state()
 
     def set_buttons_state_while_task(self, state: bool):
-        logger.info(f"Set buttons state {state}")
+        log.info(f"Set buttons state {state}")
         for button in self._task_buttons:
             button.setEnabled(state)
 
     def stop_tasks(self):
         """Drop backups that haven't started yet. Running ones finish on their own."""
-        logger.info("Stopping background tasks")
+        log.info("Stopping background tasks")
         self.thread_pool.clear()
 
     # ---------- Background service ----------
@@ -744,11 +744,11 @@ class GitDatBackUI(QWidget):
         service_dialog = ServiceConfigWindow(self)
 
         if service_dialog.exec() != QDialog.DialogCode.Accepted:
-            logger.info("Cancelled service settings")
+            log.info("Cancelled service settings")
             return
 
         sch_type, month, month_day, week_day, time = service_dialog.get_selected_values()
-        logger.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
+        log.info(f"Set new schedule: {sch_type} {month} {month_day} {week_day}, {time}")
         with self.config.batch() as s:
             s.schedule_type = sch_type
             s.schedule_month = month
@@ -760,7 +760,7 @@ class GitDatBackUI(QWidget):
         s = self.config.settings
 
         if s.schedule_week_day or s.schedule_time:
-            logger.info(f"Register service with schedule: {s.schedule_type} {s.schedule_week_day} - {s.schedule_time}")
+            log.info(f"Register service with schedule: {s.schedule_type} {s.schedule_week_day} - {s.schedule_time}")
             success, status = systemd.register_service(
                 schedule_type=s.schedule_type,
                 week_day=s.schedule_week_day,
@@ -769,7 +769,7 @@ class GitDatBackUI(QWidget):
                 time=s.schedule_time,
             )
         else:
-            logger.info("Register service with default schedule")
+            log.info("Register service with default schedule")
             success, status = systemd.register_service()
 
         self._offer_command(success, status)
@@ -795,10 +795,10 @@ class GitDatBackUI(QWidget):
         sys.exit(self.app.exec())
 
     def closeEvent(self, event):
-        logger.info("Application close.")
+        log.info("Application close.")
         self.stop_tasks()
         self.save_state()
-        logger.info("Shutdown")
+        log.info("Shutdown")
         event.accept()
 
     def save_state(self):
