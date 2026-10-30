@@ -80,6 +80,24 @@ def parse_github_url(url: str) -> Optional[GitHubTarget]:
     return GitHubTarget(EntryKind.REPO, owner, name) if name else None
 
 
+def owner_and_url(kind: EntryKind, key: str) -> tuple[str, str]:
+    """
+    The GitHub owner and URL for an entry identified the way settings store it.
+    A
+    n account by its owner name, a repository by its URL (https://github.com/<owner>/<name>).
+
+    Returns ("", key) when a repository URL can't be read.
+    """
+    if kind == EntryKind.ACCOUNT:
+        return key, github_url(key)
+
+    target = parse_github_url(key)
+    if target is None:
+        logger.warning(f"Can't tell the owner of {key!r}")
+        return "", key
+    return target.owner, key
+
+
 def list_account_repos(owner: str) -> list[RemoteRepo]:
     """
     Every public repository owned by a GitHub user or organisation, sorted by name.
