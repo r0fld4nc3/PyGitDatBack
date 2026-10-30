@@ -386,6 +386,43 @@ class SettingsManager:
                 new.locations = list(old.locations)
             return new
 
+    def export_repos_data(self, path: Path | str) -> bool:
+        """
+        Write saved repositories and/or accounts to `path`, in the same format as the settings file:
+
+            {"repos": {<url>: {...}}, "accounts": {<owner>: {...}}}
+        """
+        with self.lock:
+            data = self._to_dict()
+
+        export: dict = {
+            _COLLECTIONS[entry_kind][0]: data[_COLLECTIONS[entry_kind][0]] for entry_kind in _COLLECTIONS.keys()
+        }
+
+        log.info(f"Exported saved repository data to '{path}'")
+
+        return self._write_text_atomic(Path(path), json.dumps(export, indent=2, ensure_ascii=False))
+
+    def import_repos_data(self, path: Path | str) -> bool:
+        """
+        Add the repositories and accounts from an export file (or a settings file) to the saved ones.
+        Entries already saved under the same key are replaced by the file's.
+        """
+        data = self._read_json(Path(path))
+        if data is None:
+            return False
+
+        # Loaded like the settings file itself: wrong types fall back to defaults, invalid entries are skipped
+        imported = self._from_dict({name: data.get(name, {}) for name in _COLLECTION_FIELDS})
+
+        with self.batch():
+            for name in _COLLECTION_FIELDS:
+                getattr(self.settings, name).update(getattr(imported, name))
+            self._on_change(save_now=True)
+
+        log.info(f"Imported {sum(len(getattr(imported, name)) for name in _COLLECTION_FIELDS)} entries from {path}")
+        return True
+
     def _collection(self, kind: EntryKind) -> dict:
         field_name, _ = _COLLECTIONS[kind]
         return getattr(self.settings, field_name)
